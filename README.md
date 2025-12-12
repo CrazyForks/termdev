@@ -8,7 +8,6 @@ A Bun + TypeScript **Chrome DevTools Protocol (CDP)** client with a terminal UI 
 
 ## Prerequisites
 
-- Bun installed
 - Google Chrome (or Chromium-based browser)
 
 ## Start Chrome with CDP enabled (macOS)
@@ -30,6 +29,9 @@ curl http://127.0.0.1:9222/json/version
 ## Install
 
 ```bash
+npm install -g @taotao7/termdev
+
+# or develop locally
 bun install
 ```
 
@@ -85,6 +87,7 @@ termdev --network
 
 - `j/k` or `↑/↓`: move selection
 - `PgUp/PgDn`: page up/down
+- `y`: copy selected line to clipboard
 - `z`: expand/collapse selected node
 - `Z`: collapse the current region (closest expanded parent)
 - `f`: follow tail
