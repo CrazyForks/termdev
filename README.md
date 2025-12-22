@@ -90,7 +90,7 @@ termdev --network
 ### Logs / Network navigation
 
 - `j/k` or `↑/↓`: move selection
-- `PgUp/PgDn`: page up/down
+- `PgUp/PgDn` or `Ctrl+U/Ctrl+D`: page up/down
 - `y`: copy selected line to clipboard
 - `z`: expand/collapse selected node (expand Response Body to view formatted JSON)
 - `Z`: collapse the current region (closest expanded parent)

@@ -1798,7 +1798,7 @@ function App({ opts }: AppProps) {
         else setActiveFollow(false);
         return;
       }
-      if (key.pageUp) {
+      if (key.pageUp || (key.ctrl && input === "u")) {
         if (!activeFlat.length) return;
         setActiveFollow(false);
         const nextIdx = clamp(
@@ -1809,7 +1809,7 @@ function App({ opts }: AppProps) {
         setActiveSelected(activeFlat[nextIdx]?.nodeId ?? null);
         return;
       }
-      if (key.pageDown) {
+      if (key.pageDown || (key.ctrl && input === "d")) {
         if (!activeFlat.length) return;
         const nextIdx = clamp(
           activeIndex + visibleLogLines,
