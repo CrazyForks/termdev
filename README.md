@@ -3,7 +3,7 @@
 A Bun + TypeScript **Chrome DevTools Protocol (CDP)** client with a terminal UI (Ink) for:
 
 - **Logs**: console output + exceptions (supports selecting each line and expanding objects)
-- **Network**: request list with expandable request/response details
+- **Network**: request list with expandable request/response details (JSON responses are automatically formatted)
 - **Eval**: run JavaScript in the attached page from the terminal
 
 ## Prerequisites
@@ -29,8 +29,6 @@ curl http://127.0.0.1:9222/json/version
 ## Example
 
 https://github.com/user-attachments/assets/f2506fe4-7151-4920-bd2a-54d0b024e9ba
-
-
 
 ## Install
 
@@ -94,10 +92,12 @@ termdev --network
 - `j/k` or `↑/↓`: move selection
 - `PgUp/PgDn`: page up/down
 - `y`: copy selected line to clipboard
-- `z`: expand/collapse selected node
+- `z`: expand/collapse selected node (expand Response Body to view formatted JSON)
 - `Z`: collapse the current region (closest expanded parent)
-- `f`: follow tail
-- `c`: clear
+- `f`: follow tail (manually enable auto-scroll to latest entries)
+- `c`: clear logs (in Logs tab) or clear network requests (in Network tab)
+
+**Note**: New network requests are added to the list without automatically moving the cursor. Press `f` to enable auto-follow if you want to track new requests automatically.
 
 ### Eval (run JavaScript in the attached page)
 

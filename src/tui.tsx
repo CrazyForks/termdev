@@ -296,6 +296,32 @@ function serializeNodeDeep(node: LogNode, indent = 0): string[] {
   return out;
 }
 
+function serializeBodyOnly(node: LogNode): string[] {
+  // For network body nodes, only copy the actual body content, skip meta comments
+  if (node.kind === "meta") {
+    return []; // Skip meta nodes (comments)
+  }
+  if (node.kind === "text") {
+    return [node.text ?? ""];
+  }
+  if (node.kind === "entry" && node.net?.role === "body") {
+    // For body nodes, only serialize children (the actual body content)
+    const children = Array.isArray(node.children) ? node.children : [];
+    const out: string[] = [];
+    for (const c of children) {
+      out.push(...serializeBodyOnly(c));
+    }
+    return out;
+  }
+  // For other nodes, use normal serialization
+  const children = Array.isArray(node.children) ? node.children : [];
+  const out: string[] = [];
+  for (const c of children) {
+    out.push(...serializeBodyOnly(c));
+  }
+  return out;
+}
+
 async function copyToClipboard(text: string): Promise<boolean> {
   const trimmed = text.replace(/\s+$/g, "") + "\n";
   try {
@@ -770,14 +796,21 @@ function App({ opts }: AppProps) {
       net: { requestId: rid, role: "response" },
     };
 
+    const reqBodyNode: LogNode = {
+      id: `net:${rid}:reqBody`,
+      kind: "entry" as const,
+      label: "Request Body",
+      expanded: false,
+      children: [
+        { id: newNodeId(), kind: "meta" as const, text: "(press z to view)" },
+      ],
+      net: { requestId: rid, role: "body", which: "request" },
+    };
+
     const reqMeta: LogNode[] = [];
-    if (r?.postData)
-      reqMeta.push({
-        id: newNodeId(),
-        kind: "entry" as const,
-        label: `Request Body: ${truncate(r.postData, 200)}`,
-        expanded: false,
-      });
+    if (r?.postData) {
+      reqMeta.push(reqBodyNode);
+    }
 
     return [...meta, reqHeadersNode, ...reqMeta, responseNode];
   };
@@ -1080,6 +1113,42 @@ function App({ opts }: AppProps) {
           return { ...n, expanded: nextExpanded, children };
         })
       );
+      return;
+    }
+
+    // request body node: format on first expand
+    if (node.net?.role === "body" && node.net?.which === "request") {
+      const rid = node.net.requestId;
+      setNetTree((prev) =>
+        updateNodeById(prev, nodeId, (n) => ({ ...n, expanded: nextExpanded }))
+      );
+      if (!nextExpanded) return;
+
+      const record = netByIdRef.current.get(rid);
+      if (record?.postData) {
+        const { lines, typeHint } = formatResponseBody(record.postData, false);
+        const LIMIT = 300;
+        const sliced = lines.slice(0, LIMIT);
+        const children: LogNode[] = [
+          { id: newNodeId(), kind: "meta" as const, text: typeHint },
+          ...sliced.map((t) => ({
+            id: newNodeId(),
+            kind: "text" as const,
+            text: t,
+          })),
+        ];
+        if (lines.length > LIMIT) {
+          children.push({
+            id: newNodeId(),
+            kind: "meta" as const,
+            text: `… (${lines.length - LIMIT} more lines)`,
+          });
+        }
+        setNetTree((prev) =>
+          updateNodeById(prev, nodeId, (n) => ({ ...n, children }))
+        );
+        return;
+      }
       return;
     }
 
@@ -1475,7 +1544,6 @@ function App({ opts }: AppProps) {
           type: p?.type ? String(p.type) : undefined,
         });
         ensureNetRequestNode(rid);
-        if (followNetTail) setSelectedNetNodeId(`net:${rid}`);
       });
 
       Network?.responseReceived?.((p: any) => {
@@ -1779,7 +1847,11 @@ function App({ opts }: AppProps) {
             : findNodeById(netTree, nodeId);
         if (!root) return;
 
-        const text = serializeNodeDeep(root, 0).join("\n");
+        // For network body nodes, only copy the body content (skip meta comments)
+        const text =
+          root.net?.role === "body"
+            ? serializeBodyOnly(root).join("\n")
+            : serializeNodeDeep(root, 0).join("\n");
         void (async () => {
           const ok = await copyToClipboard(text);
           setStatus(ok ? "copied" : "copy failed (no clipboard tool)");
