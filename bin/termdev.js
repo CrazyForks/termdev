@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
-import { spawn } from "child_process";
+import { spawn, execSync } from "child_process";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import { existsSync } from "fs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -11,6 +12,16 @@ const tsFile = join(__dirname, "termdev.ts");
 // Support both Bun and Node.js runtime
 const argv = typeof Bun !== "undefined" ? Bun.argv : process.argv;
 
+// Helper to check if command exists
+function which(cmd) {
+  try {
+    execSync(`which ${cmd}`, { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Try Bun first, then tsx
 if (typeof Bun !== "undefined") {
   // Use Bun directly
@@ -18,10 +29,28 @@ if (typeof Bun !== "undefined") {
     stdio: "inherit",
   }).exited;
 } else {
-  // Use tsx for Node.js
-  const proc = spawn("tsx", [tsFile, ...argv.slice(2)], {
+  // Try to find tsx in local node_modules first
+  const localTsx = join(__dirname, "..", "node_modules", ".bin", "tsx");
+  let tsxCmd;
+  let tsxArgs;
+
+  if (existsSync(localTsx)) {
+    // Use local tsx
+    tsxCmd = localTsx;
+    tsxArgs = [tsFile, ...argv.slice(2)];
+  } else if (which("tsx")) {
+    // Use global tsx
+    tsxCmd = "tsx";
+    tsxArgs = [tsFile, ...argv.slice(2)];
+  } else {
+    // Try npx as last resort
+    tsxCmd = "npx";
+    tsxArgs = ["--yes", "tsx", tsFile, ...argv.slice(2)];
+  }
+
+  const proc = spawn(tsxCmd, tsxArgs, {
     stdio: "inherit",
-    shell: true,
+    shell: tsxCmd === "npx", // Use shell for npx
   });
 
   proc.on("exit", (code) => {
@@ -29,10 +58,12 @@ if (typeof Bun !== "undefined") {
   });
 
   proc.on("error", (err) => {
-    console.error(
-      "Error: tsx is required for Node.js. Install it with: npm install -g tsx"
-    );
-    console.error("Or use Bun: bun install && bun ./bin/termdev.ts");
+    console.error("Error: Failed to run termdev.");
+    console.error("tsx is required for Node.js runtime.");
+    console.error("\nOptions:");
+    console.error("  1. Install dependencies: npm install");
+    console.error("  2. Install tsx globally: npm install -g tsx");
+    console.error("  3. Use Bun instead: bun install && bun ./bin/termdev.ts");
     process.exit(1);
   });
 }

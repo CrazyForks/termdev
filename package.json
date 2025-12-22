@@ -1,6 +1,6 @@
 {
   "name": "@taotao7/termdev",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Terminal DevTools for Chrome DevTools Protocol (CDP)",
   "module": "index.ts",
   "type": "module",
@@ -30,14 +30,14 @@
     "chrome-remote-interface": "^0.33.2",
     "ink": "^5.2.1",
     "ink-text-input": "^6.0.0",
-    "react": "^18.3.1"
+    "react": "^18.3.1",
+    "tsx": "^4.7.0"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/chrome-remote-interface": "^0.31.14",
     "@types/node": "^20.0.0",
     "@types/react": "^18.3.12",
-    "tsx": "^4.7.0",
     "typescript": "^5.8.3"
   },
   "peerDependencies": {
