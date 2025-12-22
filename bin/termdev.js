@@ -29,28 +29,29 @@ if (typeof Bun !== "undefined") {
     stdio: "inherit",
   }).exited;
 } else {
-  // Try to find tsx in local node_modules first
+  // Try to find tsx: first check local, then global, then use npx
   const localTsx = join(__dirname, "..", "node_modules", ".bin", "tsx");
   let tsxCmd;
   let tsxArgs;
 
   if (existsSync(localTsx)) {
-    // Use local tsx
+    // Use local tsx (development)
     tsxCmd = localTsx;
     tsxArgs = [tsFile, ...argv.slice(2)];
   } else if (which("tsx")) {
-    // Use global tsx
+    // Use tsx from PATH (global install)
     tsxCmd = "tsx";
     tsxArgs = [tsFile, ...argv.slice(2)];
   } else {
-    // Try npx as last resort
+    // Use npx to find tsx (works for both local and global installs)
+    // npx will look in node_modules (local or global) without downloading
     tsxCmd = "npx";
-    tsxArgs = ["--yes", "tsx", tsFile, ...argv.slice(2)];
+    tsxArgs = ["tsx", tsFile, ...argv.slice(2)];
   }
 
   const proc = spawn(tsxCmd, tsxArgs, {
     stdio: "inherit",
-    shell: tsxCmd === "npx", // Use shell for npx
+    shell: tsxCmd === "npx",
   });
 
   proc.on("exit", (code) => {
@@ -60,10 +61,11 @@ if (typeof Bun !== "undefined") {
   proc.on("error", (err) => {
     console.error("Error: Failed to run termdev.");
     console.error("tsx is required for Node.js runtime.");
-    console.error("\nOptions:");
-    console.error("  1. Install dependencies: npm install");
-    console.error("  2. Install tsx globally: npm install -g tsx");
-    console.error("  3. Use Bun instead: bun install && bun ./bin/termdev.ts");
+    console.error("\nPlease ensure:");
+    console.error(
+      "  1. Dependencies are installed: npm install -g @taotao7/termdev"
+    );
+    console.error("  2. Or use Bun: bun install -g @taotao7/termdev");
     process.exit(1);
   });
 }
