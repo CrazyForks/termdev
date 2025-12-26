@@ -29,35 +29,35 @@ const LOG_MAX_LINES = 5000;
 // ═══════════════════════════════════════════════════════════════════════════
 const ICONS = {
   // UI Elements
-  logo: "",        // nf-cod-terminal
-  connected: "",   // nf-cod-circle_filled
-  disconnected: "", // nf-cod-circle_outline
-  bullet: "",      // nf-cod-chevron_right
-  expand: "",      // nf-cod-chevron_down
-  collapse: "",    // nf-cod-chevron_right
-  star: "",        // nf-cod-star_full
+  logo: "\ueb8e",        // nf-cod-terminal
+  connected: "\uea71",   // nf-cod-circle_filled
+  disconnected: "\uea72", // nf-cod-circle_outline
+  bullet: "\ueab6",      // nf-cod-chevron_right
+  expand: "\ueab4",      // nf-cod-chevron_down
+  collapse: "\ueab6",    // nf-cod-chevron_right
+  star: "\ueb59",        // nf-cod-star_full
   
   // Targets
-  page: "",        // nf-cod-globe
-  file: "",        // nf-cod-file
-  gear: "",        // nf-cod-gear
-  window: "",      // nf-cod-window
-  mobile: "",      // nf-cod-device_mobile
-  worker: "",      // nf-cod-person
-  link: "",        // nf-cod-link
-  plug: "",        // nf-cod-plug
+  page: "\ueb01",        // nf-cod-globe
+  file: "\ueaf4",        // nf-cod-file
+  gear: "\ueb51",        // nf-cod-settings_gear (gear)
+  window: "\ueb14",      // nf-cod-window
+  mobile: "\uea8a",      // nf-cod-device_mobile
+  worker: "\ueb36",      // nf-cod-person
+  link: "\ueb15",        // nf-cod-link
+  plug: "\ueb39",        // nf-cod-plug
   
   // Actions
-  search: "",      // nf-cod-search
-  zap: "",         // nf-cod-zap
-  list: "",        // nf-cod-list_flat
-  network: "",     // nf-md-web
+  search: "\uea6d",      // nf-cod-search
+  zap: "\ueb6c",         // nf-cod-zap
+  list: "\ueb85",        // nf-cod-list_flat
+  network: "\uf484",     // nf-md-web
   
   // Status
-  check: "",       // nf-cod-check
-  error: "",       // nf-cod-error
-  warning: "",     // nf-cod-warning
-  info: "",        // nf-cod-info
+  check: "\ueab2",       // nf-cod-check
+  error: "\ueae2",       // nf-cod-error
+  warning: "\uea6c",     // nf-cod-warning
+  info: "\uea74",        // nf-cod-info
 } as const;
 
 // ASCII Art Logo with rainbow gradient

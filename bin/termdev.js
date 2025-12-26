@@ -2105,29 +2105,29 @@ function pickTargetByQuery(targets, query) {
 import { jsxDEV, Fragment } from "react/jsx-dev-runtime";
 var LOG_MAX_LINES = 5000;
 var ICONS = {
-  logo: "",
-  connected: "",
-  disconnected: "",
-  bullet: "",
-  expand: "",
-  collapse: "",
-  star: "",
-  page: "",
-  file: "",
-  gear: "",
-  window: "",
-  mobile: "",
-  worker: "",
-  link: "",
-  plug: "",
-  search: "",
-  zap: "",
-  list: "",
-  network: "",
-  check: "",
-  error: "",
-  warning: "",
-  info: ""
+  logo: "",
+  connected: "",
+  disconnected: "",
+  bullet: "",
+  expand: "",
+  collapse: "",
+  star: "",
+  page: "",
+  file: "",
+  gear: "",
+  window: "",
+  mobile: "",
+  worker: "",
+  link: "",
+  plug: "",
+  search: "",
+  zap: "",
+  list: "",
+  network: "",
+  check: "",
+  error: "",
+  warning: "",
+  info: ""
 };
 var LOGO_ART = `
 ╔════════════════════════════════════════════════════════════════╗
@@ -4260,4 +4260,4 @@ async function run(argv) {
 var argv = typeof Bun !== "undefined" ? Bun.argv : process.argv;
 await run(argv.slice(2));
 
-//# debugId=FCA3098699D0AD9D64756E2164756E21
+//# debugId=0D226FD086BBDFDC64756E2164756E21
