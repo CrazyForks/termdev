@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, render, useApp, useInput, useStdout } from "ink";
 import TextInput from "ink-text-input";
+import gradient from "gradient-string";
 import type { Client } from "chrome-remote-interface";
 
 import { connectToTarget, listTargets, safeCloseClient } from "./cdp.ts";
@@ -22,6 +23,203 @@ type AppProps = {
 };
 
 const LOG_MAX_LINES = 5000;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Nerd Font Icons (requires a Nerd Font patched terminal font)
+// ═══════════════════════════════════════════════════════════════════════════
+const ICONS = {
+  // UI Elements
+  logo: "",        // nf-cod-terminal
+  connected: "",   // nf-cod-circle_filled
+  disconnected: "", // nf-cod-circle_outline
+  bullet: "",      // nf-cod-chevron_right
+  expand: "",      // nf-cod-chevron_down
+  collapse: "",    // nf-cod-chevron_right
+  star: "",        // nf-cod-star_full
+  
+  // Targets
+  page: "",        // nf-cod-globe
+  file: "",        // nf-cod-file
+  gear: "",        // nf-cod-gear
+  window: "",      // nf-cod-window
+  mobile: "",      // nf-cod-device_mobile
+  worker: "",      // nf-cod-person
+  link: "",        // nf-cod-link
+  plug: "",        // nf-cod-plug
+  
+  // Actions
+  search: "",      // nf-cod-search
+  zap: "",         // nf-cod-zap
+  list: "",        // nf-cod-list_flat
+  network: "",     // nf-md-web
+  
+  // Status
+  check: "",       // nf-cod-check
+  error: "",       // nf-cod-error
+  warning: "",     // nf-cod-warning
+  info: "",        // nf-cod-info
+} as const;
+
+// ASCII Art Logo with rainbow gradient
+const LOGO_ART = `
+╔════════════════════════════════════════════════════════════════╗
+║                                                                ║
+║   ████████╗███████╗██████╗ ███╗   ███╗██████╗ ███████╗██╗   ██╗║
+║   ╚══██╔══╝██╔════╝██╔══██╗████╗ ████║██╔══██╗██╔════╝██║   ██║║
+║      ██║   █████╗  ██████╔╝██╔████╔██║██║  ██║█████╗  ██║   ██║║
+║      ██║   ██╔══╝  ██╔══██╗██║╚██╔╝██║██║  ██║██╔══╝  ╚██╗ ██╔╝║
+║      ██║   ███████╗██║  ██║██║ ╚═╝ ██║██████╔╝███████╗ ╚████╔╝ ║
+║      ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═════╝ ╚══════╝  ╚═══╝  ║
+║                                                                ║
+╚════════════════════════════════════════════════════════════════╝
+`;
+
+const LOGO_SUBTITLE = " Terminal DevTools for Chrome DevTools Protocol";
+const LOGO_HINT = " Press any key to continue...";
+
+// Rainbow gradient for logo
+const rainbowGradient = gradient([
+  "#FF6B6B",
+  "#FFE66D",
+  "#4ECDC4",
+  "#45B7D1",
+  "#96CEB4",
+  "#DDA0DD",
+  "#FF6B6B",
+]);
+
+// Header gradient (cyberpunk style)
+const headerGradient = gradient(["#00D9FF", "#00FF94", "#FFE600"]);
+
+// Target type icons (Nerd Font)
+const TARGET_ICONS: Record<string, string> = {
+  page: ICONS.page,
+  background_page: ICONS.file,
+  service_worker: ICONS.gear,
+  iframe: ICONS.window,
+  webview: ICONS.mobile,
+  worker: ICONS.worker,
+  shared_worker: ICONS.link,
+  other: ICONS.plug,
+};
+
+const getTargetIcon = (type: string): string => {
+  return TARGET_ICONS[type] ?? TARGET_ICONS.other ?? ICONS.plug;
+};
+
+const getTargetColor = (
+  type: string,
+  selected: boolean,
+  attached: boolean
+): string | undefined => {
+  if (attached) return "green";
+  if (selected) return "cyan";
+  switch (type) {
+    case "page":
+      return "white";
+    case "service_worker":
+      return "yellow";
+    case "background_page":
+      return "magenta";
+    case "iframe":
+      return "blue";
+    default:
+      return undefined;
+  }
+};
+
+// HTTP status code colors
+const getStatusColor = (status: number | undefined): string => {
+  if (!status) return "gray";
+  if (status >= 200 && status < 300) return "green";
+  if (status >= 300 && status < 400) return "cyan";
+  if (status >= 400 && status < 500) return "yellow";
+  if (status >= 500) return "red";
+  return "white";
+};
+
+// Logo component
+function LogoScreen({
+  onDismiss,
+  rows,
+  columns,
+}: {
+  onDismiss: () => void;
+  rows: number;
+  columns: number;
+}) {
+  useInput(() => {
+    onDismiss();
+  });
+
+  const logoLines = LOGO_ART.trim().split("\n");
+  const colors = [
+    "#FF6B6B",
+    "#FFE66D",
+    "#4ECDC4",
+    "#45B7D1",
+    "#96CEB4",
+    "#DDA0DD",
+  ];
+  
+  const coloredLines = logoLines.map((line, i) => {
+    // Apply different gradient colors to each line for rainbow effect
+    const c1 = colors[i % colors.length]!;
+    const c2 = colors[(i + 1) % colors.length]!;
+    const c3 = colors[(i + 2) % colors.length]!;
+    const lineGradient = gradient([c1, c2, c3]);
+    return lineGradient(line);
+  });
+
+  const subtitleColored = gradient(["#4ECDC4", "#45B7D1", "#96CEB4"])(
+    LOGO_SUBTITLE
+  );
+  const hintColored = gradient(["#888888", "#aaaaaa", "#888888"])(LOGO_HINT);
+
+  // Center vertically
+  const totalHeight = logoLines.length + 4; // logo + subtitle + hint + spacing
+  const topPadding = Math.max(0, Math.floor((rows - totalHeight) / 2));
+
+  // Center horizontally
+  const logoWidth = Math.max(...logoLines.map((l) => l.length));
+  const leftPadding = Math.max(0, Math.floor((columns - logoWidth) / 2));
+  const subtitlePadding = Math.max(
+    0,
+    Math.floor((columns - LOGO_SUBTITLE.length) / 2)
+  );
+  const hintPadding = Math.max(0, Math.floor((columns - LOGO_HINT.length) / 2));
+
+  return (
+    <Box flexDirection="column" width="100%" height="100%">
+      {/* Top padding */}
+      {Array.from({ length: topPadding }).map((_, i) => (
+        <Text key={`pad-${i}`}> </Text>
+      ))}
+
+      {/* Logo lines */}
+      {coloredLines.map((line, i) => (
+        <Text key={`logo-${i}`}>
+          {" ".repeat(leftPadding)}
+          {line}
+        </Text>
+      ))}
+
+      {/* Subtitle */}
+      <Text> </Text>
+      <Text>
+        {" ".repeat(subtitlePadding)}
+        {subtitleColored}
+      </Text>
+
+      {/* Hint */}
+      <Text> </Text>
+      <Text>
+        {" ".repeat(hintPadding)}
+        {hintColored}
+      </Text>
+    </Box>
+  );
+}
 
 const HEADER_HEIGHT = 1;
 const FOOTER_HEIGHT = 1;
@@ -383,6 +581,9 @@ function App({ opts }: AppProps) {
   const { exit } = useApp();
   const { rows, columns } = useTerminalSizeFallback();
   const safeRows = Math.max(MIN_ROWS, rows);
+
+  // Logo screen state
+  const [showLogo, setShowLogo] = useState(true);
 
   const [host, setHost] = useState(opts.host);
   const [port] = useState(opts.port);
@@ -1943,11 +2144,6 @@ function App({ opts }: AppProps) {
     return (t.title ?? "").trim() || t.url || "(attached)";
   }, [targets, attachedIndex]);
 
-  const headerLeft = `termdev`;
-  const headerRight = `${host}:${port}  •  targets:${targets.length}${
-    attachedTitle ? `  •  attached:${attachedTitle}` : ""
-  }`;
-
   const targetsViewport = useMemo(() => {
     if (!targets.length)
       return [] as Array<{
@@ -1955,6 +2151,9 @@ function App({ opts }: AppProps) {
         lines: [string, string];
         selected: boolean;
         attached: boolean;
+        type: string;
+        icon: string;
+        color: string | undefined;
       }>;
     const slice = targets.slice(
       targetScrollTop,
@@ -1968,21 +2167,24 @@ function App({ opts }: AppProps) {
       const title = (t.title ?? "").trim() || "(no title)";
       const url = (t.url ?? "").trim();
       const type = (t.type ?? "").trim();
+      const icon = getTargetIcon(type);
+      const color = getTargetColor(type, selected, attached);
 
-      const line1Prefix = `${attached ? "●" : " "} ${String(idx).padStart(
-        2,
-        " "
-      )}`;
+      const statusIcon = attached ? "●" : selected ? "◦" : " ";
+      const line1Prefix = `${icon} ${statusIcon} ${String(idx).padStart(2, " ")}`;
       const line1 = `${line1Prefix} ${title}`;
-      const meta = [type ? `type=${type}` : "", url].filter(Boolean).join("  ");
-      const line2 = `    ${meta}`;
+      const meta = [type ? `${type}` : "", url].filter(Boolean).join(" · ");
+      const line2 = `      ${meta}`;
 
       const maxWidth = Math.max(10, Math.floor(columns * 0.33) - 6);
       return {
         key: t.id,
-        lines: [truncate(line1, maxWidth), truncate(line2, maxWidth)],
+        lines: [truncate(line1, maxWidth), truncate(line2, maxWidth)] as [string, string],
         selected,
         attached,
+        type,
+        icon,
+        color,
       };
     });
   }, [
@@ -2016,22 +2218,46 @@ function App({ opts }: AppProps) {
     };
   }, [activeFlat, activeScrollTop, visibleLogLines]);
 
-  const footer = `${status}   |   tab focus(${focus})  ${
-    focus === "right" ? `rightTab=${rightTab}  ` : ""
-  }j/k select  z toggle  Z collapse  y copy  c clear  ${
-    rightTab === "network" ? "/ search" : ": eval"
-  }  q quit`;
+  // Show logo screen
+  if (showLogo) {
+    return (
+      <LogoScreen
+        onDismiss={() => setShowLogo(false)}
+        rows={safeRows}
+        columns={columns}
+      />
+    );
+  }
+
+  // Colorful header with Nerd Font icons
+  const headerTitle = headerGradient(`${ICONS.logo} TermDev`);
+  const connectionStatus = attachedIndex !== null;
 
   return (
     <Box flexDirection="column" width="100%">
       <Box height={HEADER_HEIGHT}>
-        <Text color="cyan" bold>
-          {truncate(headerLeft, Math.max(10, columns))}
+        <Text>{headerTitle}</Text>
+        <Text dimColor> │ </Text>
+        <Text color={connectionStatus ? "green" : "yellow"}>
+          {connectionStatus ? ICONS.connected : ICONS.disconnected}
         </Text>
-        <Text> </Text>
-        <Text dimColor>
-          {truncate(headerRight, Math.max(10, columns - headerLeft.length - 1))}
+        <Text color={connectionStatus ? "green" : "yellow"}>
+          {connectionStatus ? " connected" : " waiting"}
         </Text>
+        <Text dimColor> │ </Text>
+        <Text dimColor>{host}:{port}</Text>
+        <Text dimColor> │ </Text>
+        <Text color="cyan">{ICONS.list} </Text>
+        <Text color="cyanBright" bold>{targets.length}</Text>
+        {attachedTitle ? (
+          <>
+            <Text dimColor> │ </Text>
+            <Text color="green">{ICONS.plug} </Text>
+            <Text color="green">
+              {truncate(attachedTitle, Math.max(10, columns - 65))}
+            </Text>
+          </>
+        ) : null}
       </Box>
 
       <Box flexGrow={1} height={mainHeight}>
@@ -2039,14 +2265,14 @@ function App({ opts }: AppProps) {
           flexDirection="column"
           width="33%"
           borderStyle="round"
-          borderColor={focus === "targets" ? "green" : "cyan"}
+          borderColor={focus === "targets" ? "green" : "gray"}
           paddingX={1}
           paddingY={0}
           marginRight={1}
         >
-          <Text bold>
-            Targets{focus === "targets" ? " *" : ""}{" "}
-            <Text dimColor>(↑↓/j k, Enter)</Text>
+          <Text bold color={focus === "targets" ? "cyan" : undefined}>
+            {ICONS.list} Targets{focus === "targets" ? ` ${ICONS.star}` : ""}{" "}
+            <Text dimColor>(↑↓ Enter)</Text>
           </Text>
           {targets.length === 0 ? (
             <Text dimColor>
@@ -2058,22 +2284,25 @@ function App({ opts }: AppProps) {
               {targetsViewport.map((item) => (
                 <Box key={item.key} flexDirection="column">
                   <Text
-                    color={item.selected ? "green" : undefined}
+                    color={item.color as any}
                     bold={item.selected}
+                    inverse={item.selected}
                   >
                     {item.lines[0]}
                   </Text>
-                  <Text dimColor>{item.lines[1]}</Text>
+                  <Text dimColor color={item.attached ? "green" : undefined}>
+                    {item.lines[1]}
+                  </Text>
                 </Box>
               ))}
               {targets.length > visibleTargetItems ? (
                 <Text dimColor>
-                  ({targetScrollTop + 1}-
+                  {ICONS.bullet} {targetScrollTop + 1}-
                   {Math.min(
                     targetScrollTop + visibleTargetItems,
                     targets.length
                   )}
-                  /{targets.length})
+                  /{targets.length}
                 </Text>
               ) : null}
             </Box>
@@ -2084,28 +2313,33 @@ function App({ opts }: AppProps) {
           flexDirection="column"
           width="67%"
           borderStyle="round"
-          borderColor={focus === "right" ? "green" : "cyan"}
+          borderColor={focus === "right" ? "green" : "gray"}
           paddingX={1}
         >
           <Text bold>
             <Text
-              color={rightTab === "logs" ? "cyan" : "gray"}
+              color={rightTab === "logs" ? "yellowBright" : "gray"}
               bold={rightTab === "logs"}
             >
-              Logs
+              {ICONS.list} Logs
             </Text>
-            <Text dimColor> </Text>
+            <Text dimColor> │ </Text>
             <Text
-              color={rightTab === "network" ? "cyan" : "gray"}
+              color={rightTab === "network" ? "magentaBright" : "gray"}
               bold={rightTab === "network"}
             >
-              Network
+              {ICONS.network} Network
             </Text>
             <Text dimColor>
-              {"  "}({viewport.start + 1}-{viewport.endExclusive}/
-              {activeFlat.length}) {activeFollow ? "• follow" : "• paused"}
+              {"  "}
             </Text>
-            {focus === "right" ? <Text color="green"> *focus</Text> : null}
+            <Text color="gray">
+              ({viewport.start + 1}-{viewport.endExclusive}/{activeFlat.length})
+            </Text>
+            <Text color={activeFollow ? "green" : "yellow"}>
+              {activeFollow ? ` ${ICONS.connected} follow` : ` ${ICONS.disconnected} paused`}
+            </Text>
+            {focus === "right" ? <Text color="greenBright"> {ICONS.star}</Text> : null}
           </Text>
           <Box flexDirection="column">
             {viewport.lines.map((line, i) => {
@@ -2114,7 +2348,7 @@ function App({ opts }: AppProps) {
                 focus === "right" &&
                 activeFlat[idx]?.nodeId === activeSelectedId;
 
-              const icon = line.expandable ? (line.expanded ? "▾" : "▸") : " ";
+              const icon = line.expandable ? (line.expanded ? ICONS.expand : ICONS.collapse) : " ";
               const prefix = `${" ".repeat(line.indent * 2)}${icon} `;
               const rendered = `${prefix}${line.text}`;
 
@@ -2137,30 +2371,51 @@ function App({ opts }: AppProps) {
 
           {evalOpen ? (
             <Box marginTop={0}>
-              <Text color="green" bold>
-                js›{" "}
+              <Text color="greenBright" bold>
+                {ICONS.zap} js›{" "}
               </Text>
               <TextInput value={evalText} onChange={setEvalText} />
               <Text dimColor> (Enter run, Esc cancel)</Text>
             </Box>
           ) : netSearchOpen ? (
             <Box marginTop={0}>
-              <Text color="cyan" bold>
-                /{" "}
+              <Text color="cyanBright" bold>
+                {ICONS.search} /{" "}
               </Text>
               <TextInput value={netSearchQuery} onChange={setNetSearchQuery} />
               <Text dimColor> (Enter done, Esc close, Ctrl+U clear)</Text>
             </Box>
           ) : (
             <Text dimColor>
-              <Text bold>Right:</Text> l logs / n network / [ ] switch • j/k
-              select • z toggle • Z collapse •{" "}
-              {rightTab === "network" ? "/ search" : ": eval"}
+              <Text color="yellow">l</Text> logs <Text color="yellow">n</Text> network <Text color="yellow">j/k</Text> select <Text color="yellow">z</Text> expand <Text color="yellow">:</Text> eval
             </Text>
           )}
         </Box>
       </Box>
-      <Text inverse>{truncate(footer, Math.max(10, columns))}</Text>
+      <Box>
+        <Text backgroundColor="gray" color="black">
+          {" "}
+          <Text color={connectionStatus ? "green" : "yellow"}>
+            {connectionStatus ? ICONS.connected : ICONS.disconnected}
+          </Text>
+          {" "}
+        </Text>
+        <Text backgroundColor="gray" color="black">
+          {truncate(status, Math.max(10, columns - 60))}
+        </Text>
+        <Text backgroundColor="gray" color="black"> │ </Text>
+        <Text backgroundColor="gray" color="blue" bold>tab</Text>
+        <Text backgroundColor="gray" color="black"> focus </Text>
+        <Text backgroundColor="gray" color="blue" bold>r</Text>
+        <Text backgroundColor="gray" color="black"> refresh </Text>
+        <Text backgroundColor="gray" color="blue" bold>c</Text>
+        <Text backgroundColor="gray" color="black"> clear </Text>
+        <Text backgroundColor="gray" color="blue" bold>q</Text>
+        <Text backgroundColor="gray" color="black"> quit </Text>
+        <Text backgroundColor="gray" color="black">
+          {" ".repeat(Math.max(0, columns - 80))}
+        </Text>
+      </Box>
     </Box>
   );
 }
