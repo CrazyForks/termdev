@@ -2497,6 +2497,8 @@ function App({ opts }) {
   const [selectedNetNodeId, setSelectedNetNodeId] = useState(null);
   const [netSearchOpen, setNetSearchOpen] = useState(false);
   const [netSearchQuery, setNetSearchQuery] = useState("");
+  const [logSearchOpen, setLogSearchOpen] = useState(false);
+  const [logSearchQuery, setLogSearchQuery] = useState("");
   const [targetScrollTop, setTargetScrollTop] = useState(0);
   const [evalOpen, setEvalOpen] = useState(false);
   const [evalText, setEvalText] = useState("");
@@ -2517,10 +2519,24 @@ function App({ opts }) {
   }, [targets, attachedIndex]);
   const mainHeight = Math.max(1, safeRows - HEADER_HEIGHT - FOOTER_HEIGHT);
   const panelInnerHeight = Math.max(3, mainHeight - 2);
-  const rightReserved = evalOpen || netSearchOpen ? 2 : 1;
+  const rightReserved = evalOpen || netSearchOpen || logSearchOpen ? 2 : 1;
   const visibleLogLines = Math.max(3, panelInnerHeight - 1 - rightReserved);
   const visibleTargetItems = Math.max(1, Math.floor((panelInnerHeight - 1) / TARGET_LINES_PER_ITEM));
-  const flatLogs = useMemo(() => flattenLogTree(logTree), [logTree]);
+  const filteredLogTree = useMemo(() => {
+    const q = logSearchQuery.trim().toLowerCase();
+    if (!q)
+      return logTree;
+    return logTree.filter((n) => {
+      const hay = `${n.label ?? ""} ${n.text ?? ""}`.toLowerCase();
+      if (n.kind === "entry" && Array.isArray(n.args)) {
+        const argsPreview = n.args.map(formatRemoteObject).join(" ").toLowerCase();
+        if (argsPreview.includes(q))
+          return true;
+      }
+      return hay.includes(q);
+    });
+  }, [logTree, logSearchQuery]);
+  const flatLogs = useMemo(() => flattenLogTree(filteredLogTree), [filteredLogTree]);
   const filteredNetTree = useMemo(() => {
     const q = netSearchQuery.trim().toLowerCase();
     if (!q)
@@ -2583,6 +2599,10 @@ function App({ opts }) {
     if (netSearchQuery.trim())
       setFollowNetTail(false);
   }, [netSearchQuery]);
+  useEffect(() => {
+    if (logSearchQuery.trim())
+      setFollowTail(false);
+  }, [logSearchQuery]);
   useEffect(() => {
     if (focus !== "right" || rightTab !== "logs")
       return;
@@ -3528,6 +3548,25 @@ function App({ opts }) {
       }
       return;
     }
+    if (logSearchOpen) {
+      if (key.escape) {
+        setLogSearchOpen(false);
+        return;
+      }
+      if (key.return) {
+        setLogSearchOpen(false);
+        return;
+      }
+      if (key.ctrl && input === "u") {
+        setLogSearchQuery("");
+        return;
+      }
+      if (key.ctrl && input === "c") {
+        exit();
+        return;
+      }
+      return;
+    }
     if (key.tab) {
       setFocus((f) => f === "targets" ? "right" : "targets");
       return;
@@ -3668,6 +3707,11 @@ function App({ opts }) {
         setFollowNetTail(false);
         return;
       }
+      if (rightTab === "logs" && input === "/") {
+        setLogSearchOpen(true);
+        setFollowTail(false);
+        return;
+      }
     }
     if (input === "d") {
       detach();
@@ -3702,7 +3746,7 @@ function App({ opts }) {
       return;
     }
     if (input === "?") {
-      appendTextLog("Keys: tab focus | q/esc quit | r refresh | targets: ↑↓/j k + enter attach | right: l logs / n network / [ ] switch | j/k select | z toggle | Z collapse | y copy | : eval | d detach | p ping | c clear(logs/network) | f follow");
+      appendTextLog("Keys: tab focus | q/esc quit | r refresh | targets: ↑↓/j k + enter attach | right: l logs / n network / [ ] switch | j/k select | z toggle | Z collapse | y copy | / filter | : eval | d detach | p ping | c clear(logs/network) | f follow");
     }
   });
   useEffect(() => {
@@ -4044,6 +4088,27 @@ Press r to refresh`
                     children: " (Enter done, Esc close, Ctrl+U clear)"
                   }, undefined, false, undefined, this)
                 ]
+              }, undefined, true, undefined, this) : logSearchOpen ? /* @__PURE__ */ jsxDEV(Box, {
+                marginTop: 0,
+                children: [
+                  /* @__PURE__ */ jsxDEV(Text, {
+                    color: "cyanBright",
+                    bold: true,
+                    children: [
+                      ICONS.search,
+                      " /",
+                      " "
+                    ]
+                  }, undefined, true, undefined, this),
+                  /* @__PURE__ */ jsxDEV(TextInput, {
+                    value: logSearchQuery,
+                    onChange: setLogSearchQuery
+                  }, undefined, false, undefined, this),
+                  /* @__PURE__ */ jsxDEV(Text, {
+                    dimColor: true,
+                    children: " (Enter done, Esc close, Ctrl+U clear)"
+                  }, undefined, false, undefined, this)
+                ]
               }, undefined, true, undefined, this) : /* @__PURE__ */ jsxDEV(Text, {
                 dimColor: true,
                 children: [
@@ -4067,6 +4132,11 @@ Press r to refresh`
                     children: "z"
                   }, undefined, false, undefined, this),
                   " expand ",
+                  /* @__PURE__ */ jsxDEV(Text, {
+                    color: "yellow",
+                    children: "/"
+                  }, undefined, false, undefined, this),
+                  " filter ",
                   /* @__PURE__ */ jsxDEV(Text, {
                     color: "yellow",
                     children: ":"
@@ -4190,4 +4260,4 @@ async function run(argv) {
 var argv = typeof Bun !== "undefined" ? Bun.argv : process.argv;
 await run(argv.slice(2));
 
-//# debugId=808A6A841733DA0364756E2164756E21
+//# debugId=FCA3098699D0AD9D64756E2164756E21

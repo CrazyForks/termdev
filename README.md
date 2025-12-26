@@ -104,11 +104,15 @@ termdev --network
 - `n`: switch to **Network**
 - `[` / `]`: switch tab
 
-### Network search
+### Logs / Network filter
 
-- `/`: search/filter requests by substring (URL/method/status line)
+- `/`: search/filter logs or network requests by substring (like Chrome DevTools)
 - `Esc` / `Enter`: close search
 - `Ctrl+U`: clear query
+
+**Filter behavior**: Similar to Chrome DevTools, the filter matches against:
+- **Logs**: log level (console.log, console.error, etc.), message text, and object previews
+- **Network**: URL, HTTP method, and status code
 
 ### Logs / Network navigation
 

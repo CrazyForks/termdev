@@ -589,6 +589,9 @@ function App({ opts }: AppProps) {
   const [netSearchOpen, setNetSearchOpen] = useState(false);
   const [netSearchQuery, setNetSearchQuery] = useState("");
 
+  const [logSearchOpen, setLogSearchOpen] = useState(false);
+  const [logSearchQuery, setLogSearchQuery] = useState("");
+
   const [targetScrollTop, setTargetScrollTop] = useState(0);
 
   const [evalOpen, setEvalOpen] = useState(false);
@@ -616,14 +619,29 @@ function App({ opts }: AppProps) {
 
   const mainHeight = Math.max(1, safeRows - HEADER_HEIGHT - FOOTER_HEIGHT);
   const panelInnerHeight = Math.max(3, mainHeight - 2); // subtract border
-  const rightReserved = evalOpen || netSearchOpen ? 2 : 1;
+  const rightReserved = evalOpen || netSearchOpen || logSearchOpen ? 2 : 1;
   const visibleLogLines = Math.max(3, panelInnerHeight - 1 - rightReserved); // subtract title line + input
   const visibleTargetItems = Math.max(
     1,
     Math.floor((panelInnerHeight - 1) / TARGET_LINES_PER_ITEM)
   );
 
-  const flatLogs = useMemo(() => flattenLogTree(logTree), [logTree]);
+  const filteredLogTree = useMemo(() => {
+    const q = logSearchQuery.trim().toLowerCase();
+    if (!q) return logTree;
+
+    return logTree.filter((n) => {
+      const hay = `${n.label ?? ""} ${n.text ?? ""}`.toLowerCase();
+      // Also check args preview for console entries
+      if (n.kind === "entry" && Array.isArray(n.args)) {
+        const argsPreview = n.args.map(formatRemoteObject).join(" ").toLowerCase();
+        if (argsPreview.includes(q)) return true;
+      }
+      return hay.includes(q);
+    });
+  }, [logTree, logSearchQuery]);
+
+  const flatLogs = useMemo(() => flattenLogTree(filteredLogTree), [filteredLogTree]);
 
   const filteredNetTree = useMemo(() => {
     const q = netSearchQuery.trim().toLowerCase();
@@ -703,6 +721,11 @@ function App({ opts }: AppProps) {
     // When filtering, pause auto-follow to keep selection stable.
     if (netSearchQuery.trim()) setFollowNetTail(false);
   }, [netSearchQuery]);
+
+  useEffect(() => {
+    // When filtering logs, pause auto-follow to keep selection stable.
+    if (logSearchQuery.trim()) setFollowTail(false);
+  }, [logSearchQuery]);
 
   useEffect(() => {
     if (focus !== "right" || rightTab !== "logs") return;
@@ -1899,6 +1922,26 @@ function App({ opts }: AppProps) {
       return;
     }
 
+    if (logSearchOpen) {
+      if (key.escape) {
+        setLogSearchOpen(false);
+        return;
+      }
+      if (key.return) {
+        setLogSearchOpen(false);
+        return;
+      }
+      if (key.ctrl && input === "u") {
+        setLogSearchQuery("");
+        return;
+      }
+      if (key.ctrl && input === "c") {
+        exit();
+        return;
+      }
+      return;
+    }
+
     if (key.tab) {
       setFocus((f) => (f === "targets" ? "right" : "targets"));
       return;
@@ -2053,6 +2096,12 @@ function App({ opts }: AppProps) {
         setFollowNetTail(false);
         return;
       }
+
+      if (rightTab === "logs" && input === "/") {
+        setLogSearchOpen(true);
+        setFollowTail(false);
+        return;
+      }
     }
 
     if (input === "d") {
@@ -2091,7 +2140,7 @@ function App({ opts }: AppProps) {
 
     if (input === "?") {
       appendTextLog(
-        "Keys: tab focus | q/esc quit | r refresh | targets: ↑↓/j k + enter attach | right: l logs / n network / [ ] switch | j/k select | z toggle | Z collapse | y copy | : eval | d detach | p ping | c clear(logs/network) | f follow"
+        "Keys: tab focus | q/esc quit | r refresh | targets: ↑↓/j k + enter attach | right: l logs / n network / [ ] switch | j/k select | z toggle | Z collapse | y copy | / filter | : eval | d detach | p ping | c clear(logs/network) | f follow"
       );
     }
   });
@@ -2358,9 +2407,17 @@ function App({ opts }: AppProps) {
               <TextInput value={netSearchQuery} onChange={setNetSearchQuery} />
               <Text dimColor> (Enter done, Esc close, Ctrl+U clear)</Text>
             </Box>
+          ) : logSearchOpen ? (
+            <Box marginTop={0}>
+              <Text color="cyanBright" bold>
+                {ICONS.search} /{" "}
+              </Text>
+              <TextInput value={logSearchQuery} onChange={setLogSearchQuery} />
+              <Text dimColor> (Enter done, Esc close, Ctrl+U clear)</Text>
+            </Box>
           ) : (
             <Text dimColor>
-              <Text color="yellow">l</Text> logs <Text color="yellow">n</Text> network <Text color="yellow">j/k</Text> select <Text color="yellow">z</Text> expand <Text color="yellow">:</Text> eval
+              <Text color="yellow">l</Text> logs <Text color="yellow">n</Text> network <Text color="yellow">j/k</Text> select <Text color="yellow">z</Text> expand <Text color="yellow">/</Text> filter <Text color="yellow">:</Text> eval
             </Text>
           )}
         </Box>
