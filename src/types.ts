@@ -10,3 +10,6 @@ export type TransportOptions = {
   host: string;
   port: number;
 };
+
+export type { RemoteObject, LogNodeKind, NetNodeInfo, LogNode, FlatLogLine } from "./types/log.ts";
+export type { NetRecord } from "./types/network.ts";

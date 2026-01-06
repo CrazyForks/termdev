@@ -1,0 +1,24 @@
+export type NetRecord = {
+  requestId: string;
+  startTimestamp?: number;
+  endTimestamp?: number;
+  method?: string;
+  url?: string;
+  type?: string;
+  initiator?: string;
+  requestHeaders?: Record<string, string>;
+  postData?: string;
+  status?: number;
+  statusText?: string;
+  mimeType?: string;
+  protocol?: string;
+  remoteIPAddress?: string;
+  remotePort?: number;
+  fromDiskCache?: boolean;
+  fromServiceWorker?: boolean;
+  responseHeaders?: Record<string, string>;
+  encodedDataLength?: number;
+  errorText?: string;
+  canceled?: boolean;
+  responseBody?: { body: string; base64Encoded: boolean };
+};
