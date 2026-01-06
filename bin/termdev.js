@@ -1351,9 +1351,1460 @@ function parseCli(argv) {
 }
 
 // src/tui.tsx
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, render, useApp, useInput, useStdout } from "ink";
-import TextInput from "ink-text-input";
+import { useEffect as useEffect5, useMemo as useMemo5, useRef as useRef5, useState as useState4, useCallback as useCallback6 } from "react";
+import { Box as Box6, render, useApp, useInput as useInput2, useStdout } from "ink";
+
+// src/format.ts
+import { inspect } from "node:util";
+function toDateFromCdpTimestamp(ts) {
+  if (!Number.isFinite(ts))
+    return new Date(0);
+  const ms = ts > 1000000000000 ? ts : ts * 1000;
+  return new Date(ms);
+}
+function formatTime(ts) {
+  const d = toDateFromCdpTimestamp(ts);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+function formatRemoteObject(obj) {
+  if (!obj || typeof obj !== "object")
+    return String(obj);
+  if (typeof obj.unserializableValue === "string")
+    return obj.unserializableValue;
+  if ("value" in obj) {
+    const v = obj.value;
+    if (typeof v === "string")
+      return v;
+    return inspect(v, {
+      depth: 4,
+      maxArrayLength: 50,
+      breakLength: 120,
+      colors: false,
+      compact: true
+    });
+  }
+  const className = typeof obj.className === "string" ? obj.className : undefined;
+  const description = typeof obj.description === "string" ? obj.description : undefined;
+  const preview = obj.preview;
+  if (preview && typeof preview === "object") {
+    const head = className ?? description ?? (typeof preview.description === "string" ? preview.description : undefined) ?? "Object";
+    const body = formatObjectPreview(preview);
+    return body ? `${head} ${body}` : head;
+  }
+  if (className)
+    return `#<${className}>`;
+  if (description) {
+    const m = description.match(/^\[object\s+(.+?)\]$/);
+    if (m?.[1])
+      return `#<${m[1]}>`;
+    return description;
+  }
+  if (typeof obj.type === "string")
+    return `[${obj.type}]`;
+  return inspect(obj, { depth: 2, colors: false });
+}
+function formatObjectPreview(preview) {
+  const subtype = typeof preview.subtype === "string" ? preview.subtype : undefined;
+  const overflow = Boolean(preview.overflow);
+  const props = Array.isArray(preview.properties) ? preview.properties : [];
+  const entries = Array.isArray(preview.entries) ? preview.entries : [];
+  if (subtype === "array") {
+    const items = props.filter((p) => typeof p?.name === "string" && /^\d+$/.test(p.name)).sort((a, b) => Number(a.name) - Number(b.name)).slice(0, 10).map((p) => formatPreviewValue(p));
+    const tail2 = overflow ? ", …" : "";
+    return `[${items.join(", ")}${tail2}]`;
+  }
+  if (subtype === "map") {
+    const pairs2 = entries.slice(0, 8).map((e) => {
+      const k = e?.key ? formatPreviewValue(e.key) : "?";
+      const v = e?.value ? formatPreviewValue(e.value) : "?";
+      return `${k} => ${v}`;
+    });
+    const tail2 = overflow ? ", …" : "";
+    return `{${pairs2.join(", ")}${tail2}}`;
+  }
+  if (subtype === "set") {
+    const items = entries.slice(0, 8).map((e) => e?.value ? formatPreviewValue(e.value) : "?");
+    const tail2 = overflow ? ", …" : "";
+    return `{${items.join(", ")}${tail2}}`;
+  }
+  const pairs = props.slice(0, 12).map((p) => {
+    const name = typeof p?.name === "string" ? p.name : "?";
+    return `${name}: ${formatPreviewValue(p)}`;
+  });
+  const tail = overflow ? ", …" : "";
+  return `{${pairs.join(", ")}${tail}}`;
+}
+function formatPreviewValue(p) {
+  if (p && typeof p === "object") {
+    if (typeof p.value === "string")
+      return p.value;
+    if (typeof p.description === "string")
+      return p.description;
+    if (typeof p.type === "string") {
+      if (p.type === "function")
+        return "ƒ";
+      if (p.type === "undefined")
+        return "undefined";
+      if (p.type === "object")
+        return p.subtype ? String(p.subtype) : "Object";
+      return p.type;
+    }
+  }
+  return String(p);
+}
+
+// src/hooks/useTargets.ts
+import { useState, useCallback, useEffect, useRef } from "react";
+
+// src/cdp.ts
+import CDPImport from "chrome-remote-interface";
+var CDP = CDPImport?.default ?? CDPImport;
+async function listTargets(opts) {
+  const targets = await CDP.List({ host: opts.host, port: opts.port });
+  return targets ?? [];
+}
+async function connectToTarget(target, opts) {
+  const targetOpt = target.webSocketDebuggerUrl ?? target.id;
+  return await CDP({ host: opts.host, port: opts.port, target: targetOpt });
+}
+async function safeCloseClient(client) {
+  if (!client)
+    return;
+  try {
+    await client.close();
+  } catch {}
+}
+
+// src/targets.ts
+function pickTargetByQuery(targets, query) {
+  const q = query.trim();
+  if (!q)
+    return { index: -1 };
+  const asIndex = Number(q);
+  if (Number.isInteger(asIndex) && asIndex >= 0 && asIndex < targets.length) {
+    return { target: targets[asIndex], index: asIndex };
+  }
+  const qLower = q.toLowerCase();
+  const idx = targets.findIndex((t) => {
+    const title = (t.title ?? "").toLowerCase();
+    const url = (t.url ?? "").toLowerCase();
+    return title.includes(qLower) || url.includes(qLower);
+  });
+  return { target: idx >= 0 ? targets[idx] : undefined, index: idx };
+}
+
+// src/utils/tree.ts
+function splitLines(s) {
+  return String(s).split(`
+`);
+}
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
+function truncate(s, max) {
+  if (max <= 0)
+    return "";
+  if (s.length <= max)
+    return s;
+  if (max === 1)
+    return "…";
+  return `${s.slice(0, max - 1)}…`;
+}
+function isObjectExpandable(obj) {
+  return Boolean(obj && typeof obj === "object" && typeof obj.objectId === "string" && obj.objectId.length > 0);
+}
+function flattenLogTree(nodes, parentId = null, indent = 0) {
+  const out = [];
+  for (const n of nodes) {
+    const expandable = n.kind === "entry" ? Array.isArray(n.args) && n.args.length > 0 || Array.isArray(n.children) && n.children.length > 0 || Boolean(n.loading) : n.kind === "arg" ? isObjectExpandable(n.object) : n.kind === "prop" ? isObjectExpandable(n.value) : false;
+    const expanded = Boolean(n.expanded);
+    const text = (() => {
+      if (n.kind === "text")
+        return n.text ?? "";
+      if (n.kind === "meta")
+        return n.text ?? "";
+      if (n.kind === "entry") {
+        const label = n.label ?? "";
+        const args = Array.isArray(n.args) ? n.args : [];
+        const preview = args.map(formatRemoteObject).join(" ");
+        return preview ? `${label} ${preview}` : label;
+      }
+      if (n.kind === "arg") {
+        const obj = n.object;
+        return obj ? formatRemoteObject(obj) : "";
+      }
+      if (n.kind === "prop") {
+        const name = n.name ?? "?";
+        const v = n.value;
+        return `${name}: ${v ? formatRemoteObject(v) : "undefined"}`;
+      }
+      return n.text ?? "";
+    })();
+    out.push({ nodeId: n.id, parentId, indent, text, expandable, expanded });
+    if (expanded && Array.isArray(n.children) && n.children.length > 0) {
+      out.push(...flattenLogTree(n.children, n.id, indent + 1));
+    }
+  }
+  return out;
+}
+function updateNodeById(nodes, id, updater) {
+  let changed = false;
+  const next = nodes.map((n) => {
+    if (n.id === id) {
+      changed = true;
+      return updater(n);
+    }
+    if (n.children && n.children.length > 0) {
+      const updatedChildren = updateNodeById(n.children, id, updater);
+      if (updatedChildren !== n.children) {
+        changed = true;
+        return { ...n, children: updatedChildren };
+      }
+    }
+    return n;
+  });
+  return changed ? next : nodes;
+}
+function findNodeById(nodes, id) {
+  for (const n of nodes) {
+    if (n.id === id)
+      return n;
+    if (n.children) {
+      const found = findNodeById(n.children, id);
+      if (found)
+        return found;
+    }
+  }
+  return;
+}
+function serializeNodeDeep(node, indent = 0) {
+  const pad = "  ".repeat(indent);
+  const line = (() => {
+    if (node.kind === "text" || node.kind === "meta")
+      return `${pad}${node.text ?? ""}`.trimEnd();
+    if (node.kind === "entry") {
+      const label = node.label ?? "";
+      const args = Array.isArray(node.args) ? node.args : [];
+      const preview = args.map(formatRemoteObject).join(" ");
+      return `${pad}${preview ? `${label} ${preview}`.trimEnd() : label}`.trimEnd();
+    }
+    if (node.kind === "arg") {
+      return `${pad}${node.object ? formatRemoteObject(node.object) : ""}`.trimEnd();
+    }
+    if (node.kind === "prop") {
+      const name = node.name ?? "?";
+      return `${pad}${name}: ${node.value ? formatRemoteObject(node.value) : "undefined"}`.trimEnd();
+    }
+    return `${pad}${node.text ?? ""}`.trimEnd();
+  })();
+  const out = [line];
+  const children = Array.isArray(node.children) ? node.children : [];
+  for (const c of children)
+    out.push(...serializeNodeDeep(c, indent + 1));
+  return out;
+}
+function serializeBodyOnly(node) {
+  if (node.kind === "meta") {
+    return [];
+  }
+  if (node.kind === "text") {
+    return [node.text ?? ""];
+  }
+  if (node.kind === "entry" && node.net?.role === "body") {
+    const children2 = Array.isArray(node.children) ? node.children : [];
+    const out2 = [];
+    for (const c of children2) {
+      out2.push(...serializeBodyOnly(c));
+    }
+    return out2;
+  }
+  const children = Array.isArray(node.children) ? node.children : [];
+  const out = [];
+  for (const c of children) {
+    out.push(...serializeBodyOnly(c));
+  }
+  return out;
+}
+function tryPrettifyJson(body) {
+  const trimmed = body.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+    return { formatted: body, isJson: false };
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    const pretty = JSON.stringify(parsed, null, 2);
+    return { formatted: pretty, isJson: true };
+  } catch {
+    return { formatted: body, isJson: false };
+  }
+}
+function formatResponseBody(body, base64Encoded) {
+  if (base64Encoded) {
+    const preview = body.length > 100 ? body.slice(0, 100) + "..." : body;
+    return { lines: [preview], typeHint: "(base64 encoded)" };
+  }
+  const { formatted, isJson } = tryPrettifyJson(body);
+  const lines = splitLines(formatted);
+  const typeHint = isJson ? "(json, formatted)" : "(text)";
+  return { lines, typeHint };
+}
+
+// src/hooks/useTargets.ts
+function useTargets(initialHost, port, pollMs, targetQuery, onHint) {
+  const [host, setHost] = useState(initialHost);
+  const [targets, setTargets] = useState([]);
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [attachedIndex, setAttachedIndex] = useState(null);
+  const [status, setStatus] = useState(`connecting to ${initialHost}:${port}...`);
+  const lastFetchErrorRef = useRef(null);
+  const hasShownConnectHelpRef = useRef(false);
+  const selectedTargetIdRef = useRef(null);
+  const attachedTargetIdRef = useRef(null);
+  useEffect(() => {
+    selectedTargetIdRef.current = targets[selectedIndex]?.id ?? null;
+  }, [targets, selectedIndex]);
+  useEffect(() => {
+    attachedTargetIdRef.current = attachedIndex == null ? null : targets[attachedIndex]?.id ?? null;
+  }, [targets, attachedIndex]);
+  const refreshTargets = useCallback(async (preferIndex) => {
+    setStatus(`fetching targets from ${host}:${port} ...`);
+    const fetch = async (h) => {
+      return await listTargets({ host: h, port });
+    };
+    try {
+      const t = await fetch(host);
+      setTargets(t);
+      const prevSelectedId = selectedTargetIdRef.current;
+      const prevAttachedId = attachedTargetIdRef.current;
+      const selectedById = prevSelectedId != null ? t.findIndex((x) => x.id === prevSelectedId) : -1;
+      const attachedById = prevAttachedId != null ? t.findIndex((x) => x.id === prevAttachedId) : -1;
+      const idxRaw = selectedById >= 0 ? selectedById : typeof preferIndex === "number" ? preferIndex : selectedIndex;
+      const idx = clamp(idxRaw, 0, Math.max(0, t.length - 1));
+      setSelectedIndex(idx);
+      setAttachedIndex(attachedById >= 0 ? attachedById : null);
+      lastFetchErrorRef.current = null;
+      setStatus(`targets: ${t.length}  |  ${host}:${port}`);
+      return;
+    } catch (err) {
+      const firstErr = String(err);
+      if (host === "localhost") {
+        try {
+          const t = await fetch("127.0.0.1");
+          setHost("127.0.0.1");
+          setTargets(t);
+          const idx = clamp(typeof preferIndex === "number" ? preferIndex : selectedIndex, 0, Math.max(0, t.length - 1));
+          setSelectedIndex(idx);
+          onHint("[hint] localhost failed; switched host to 127.0.0.1");
+          setStatus(`targets: ${t.length}  |  127.0.0.1:${port}`);
+          return;
+        } catch {}
+      }
+      if (lastFetchErrorRef.current !== firstErr) {
+        onHint(firstErr);
+        lastFetchErrorRef.current = firstErr;
+      }
+      setTargets([]);
+      setStatus(`failed to fetch targets from ${host}:${port}`);
+      if (!hasShownConnectHelpRef.current) {
+        hasShownConnectHelpRef.current = true;
+        onHint([
+          "[hint] Start Chrome with remote debugging enabled:",
+          '  open -na "Google Chrome" --args --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-cdp',
+          "[hint] Verify endpoint:",
+          `  curl http://${host}:${port}/json/list`
+        ].join(`
+`));
+      }
+    }
+  }, [host, port, selectedIndex, onHint]);
+  const getAutoAttachTarget = useCallback(() => {
+    if (!targetQuery || !targets.length)
+      return null;
+    const picked = pickTargetByQuery(targets, targetQuery);
+    if (picked.target && picked.index >= 0) {
+      return { target: picked.target, index: picked.index };
+    }
+    return null;
+  }, [targets, targetQuery]);
+  useEffect(() => {
+    refreshTargets();
+  }, []);
+  useEffect(() => {
+    if (!pollMs || pollMs <= 0)
+      return;
+    const id = setInterval(() => {
+      refreshTargets();
+    }, pollMs);
+    return () => clearInterval(id);
+  }, [pollMs, refreshTargets]);
+  useEffect(() => {
+    setSelectedIndex((i) => clamp(i, 0, Math.max(0, targets.length - 1)));
+  }, [targets.length]);
+  return {
+    targets,
+    selectedIndex,
+    setSelectedIndex,
+    attachedIndex,
+    setAttachedIndex,
+    status,
+    setStatus,
+    host,
+    refreshTargets,
+    getAutoAttachTarget
+  };
+}
+
+// src/hooks/useCdpClient.ts
+import { useRef as useRef2, useCallback as useCallback2, useEffect as useEffect2 } from "react";
+function useCdpClient(callbacks, opts) {
+  const clientRef = useRef2(null);
+  const callbacksRef = useRef2(callbacks);
+  callbacksRef.current = callbacks;
+  const detach = useCallback2(async () => {
+    const c = clientRef.current;
+    clientRef.current = null;
+    await safeCloseClient(c);
+  }, []);
+  const attach = useCallback2(async (target, host, port) => {
+    await detach();
+    let c;
+    try {
+      c = await connectToTarget(target, { host, port });
+    } catch (err) {
+      callbacksRef.current.onTextLog(String(err));
+      return false;
+    }
+    clientRef.current = c;
+    const anyClient = c;
+    if (typeof anyClient.on === "function") {
+      anyClient.on("disconnect", () => {
+        callbacksRef.current.onDisconnect();
+      });
+    }
+    const { Runtime, Log, Network, Console } = anyClient;
+    try {
+      await Promise.all([
+        Runtime?.enable?.(),
+        Console?.enable?.(),
+        Log?.enable?.(),
+        Network?.enable?.()
+      ]);
+    } catch (err) {
+      callbacksRef.current.onTextLog(`[enable] ${String(err)}`);
+    }
+    Runtime?.consoleAPICalled?.((p) => {
+      const type = String(p?.type ?? "log");
+      const args = Array.isArray(p?.args) ? p.args : [];
+      callbacksRef.current.onLog(`console.${type}`, args, p?.timestamp);
+    });
+    Runtime?.exceptionThrown?.((p) => {
+      const details = p?.exceptionDetails;
+      const text = details?.text ? String(details.text) : "exception";
+      const args = details?.exception ? [details.exception] : [];
+      callbacksRef.current.onLog(`exception ${text}`.trimEnd(), args, p?.timestamp);
+    });
+    Console?.messageAdded?.((p) => {
+      const msg = p?.message ?? p;
+      const source = typeof msg?.source === "string" ? String(msg.source) : "";
+      if (source === "console-api")
+        return;
+      const level = String(msg?.level ?? "log");
+      const text = String(msg?.text ?? "");
+      const params = Array.isArray(msg?.parameters) ? msg.parameters : [];
+      callbacksRef.current.onLog(`console.${level} ${text}`.trimEnd(), params, msg?.timestamp);
+    });
+    Log?.entryAdded?.((p) => {
+      const entry = p?.entry ?? p;
+      const level = String(entry?.level ?? "info");
+      const text = String(entry?.text ?? "");
+      const url = entry?.url ? ` (${entry.url})` : "";
+      callbacksRef.current.onTextLog(`log.${level} ${text}${url}`.trimEnd());
+    });
+    Network?.requestWillBeSent?.((p) => {
+      const rid = String(p?.requestId ?? "");
+      if (!rid)
+        return;
+      const req = p?.request;
+      callbacksRef.current.onNetworkRequest(rid, {
+        startTimestamp: p?.timestamp,
+        method: String(req?.method ?? ""),
+        url: String(req?.url ?? ""),
+        requestHeaders: req?.headers ?? {},
+        postData: typeof req?.postData === "string" ? req.postData : undefined,
+        initiator: p?.initiator?.url ? String(p.initiator.url) : undefined,
+        type: p?.type ? String(p.type) : undefined
+      });
+    });
+    Network?.responseReceived?.((p) => {
+      const rid = String(p?.requestId ?? "");
+      if (!rid)
+        return;
+      const res = p?.response;
+      callbacksRef.current.onNetworkResponse(rid, {
+        status: typeof res?.status === "number" ? res.status : undefined,
+        statusText: typeof res?.statusText === "string" ? res.statusText : undefined,
+        mimeType: typeof res?.mimeType === "string" ? res.mimeType : undefined,
+        protocol: typeof res?.protocol === "string" ? res.protocol : undefined,
+        remoteIPAddress: typeof res?.remoteIPAddress === "string" ? res.remoteIPAddress : undefined,
+        remotePort: typeof res?.remotePort === "number" ? res.remotePort : undefined,
+        fromDiskCache: Boolean(res?.fromDiskCache),
+        fromServiceWorker: Boolean(res?.fromServiceWorker),
+        responseHeaders: res?.headers ?? {}
+      });
+    });
+    Network?.loadingFinished?.((p) => {
+      const rid = String(p?.requestId ?? "");
+      if (!rid)
+        return;
+      callbacksRef.current.onNetworkFinished(rid, {
+        endTimestamp: p?.timestamp,
+        encodedDataLength: typeof p?.encodedDataLength === "number" ? p.encodedDataLength : undefined
+      });
+    });
+    Network?.loadingFailed?.((p) => {
+      const rid = String(p?.requestId ?? "");
+      if (!rid)
+        return;
+      callbacksRef.current.onNetworkFailed(rid, {
+        endTimestamp: p?.timestamp,
+        errorText: typeof p?.errorText === "string" ? p.errorText : "failed",
+        canceled: Boolean(p?.canceled)
+      });
+    });
+    if (opts.network) {
+      Network?.webSocketFrameSent?.((p) => {
+        const payload = String(p?.response?.payloadData ?? "");
+        const truncated = payload.length > 200 ? payload.slice(0, 200) + "…" : payload;
+        callbacksRef.current.onTextLog(`ws.sent ${truncated}`.trimEnd());
+      });
+      Network?.webSocketFrameReceived?.((p) => {
+        const payload = String(p?.response?.payloadData ?? "");
+        const truncated = payload.length > 200 ? payload.slice(0, 200) + "…" : payload;
+        callbacksRef.current.onTextLog(`ws.recv ${truncated}`.trimEnd());
+      });
+    }
+    try {
+      await Runtime?.evaluate?.({
+        expression: `console.log("[termdev] attached", new Date().toISOString())`
+      });
+    } catch {}
+    return true;
+  }, [detach, opts.network]);
+  const evaluate = useCallback2(async (expression) => {
+    const c = clientRef.current;
+    const Runtime = c?.Runtime;
+    if (!Runtime?.evaluate)
+      return null;
+    try {
+      return await Runtime.evaluate({
+        expression,
+        awaitPromise: true,
+        returnByValue: false
+      });
+    } catch {
+      return null;
+    }
+  }, []);
+  const getProperties = useCallback2(async (objectId) => {
+    const c = clientRef.current;
+    const Runtime = c?.Runtime;
+    if (!Runtime?.getProperties) {
+      throw new Error("Runtime.getProperties is not available (not attached?)");
+    }
+    const res = await Runtime.getProperties({
+      objectId,
+      ownProperties: true,
+      accessorPropertiesOnly: false,
+      generatePreview: true
+    });
+    const list = Array.isArray(res?.result) ? res.result : [];
+    const items = list.filter((p) => p && typeof p.name === "string" && p.value).map((p) => ({
+      name: String(p.name),
+      value: p.value,
+      enumerable: Boolean(p.enumerable)
+    }));
+    items.sort((a, b) => Number(b.enumerable) - Number(a.enumerable) || a.name.localeCompare(b.name));
+    const LIMIT = 80;
+    const sliced = items.slice(0, LIMIT);
+    let nodeCounter = 0;
+    const newNodeId = () => `prop_${++nodeCounter}_${Date.now()}`;
+    const children = sliced.map((it) => ({
+      id: newNodeId(),
+      kind: "prop",
+      name: it.name,
+      value: it.value,
+      expanded: false
+    }));
+    if (items.length > LIMIT) {
+      children.push({
+        id: newNodeId(),
+        kind: "meta",
+        text: `… (${items.length - LIMIT} more properties)`
+      });
+    }
+    return children;
+  }, []);
+  const getResponseBody = useCallback2(async (requestId) => {
+    const c = clientRef.current;
+    const Network = c?.Network;
+    if (!Network?.getResponseBody) {
+      throw new Error("Network.getResponseBody is not available (not attached?)");
+    }
+    const res = await Network.getResponseBody({ requestId });
+    return {
+      body: String(res?.body ?? ""),
+      base64Encoded: Boolean(res?.base64Encoded)
+    };
+  }, []);
+  const ping = useCallback2(() => {
+    const c = clientRef.current;
+    c?.Runtime?.evaluate?.({
+      expression: `console.log("[termdev] ping", new Date().toISOString())`
+    });
+  }, []);
+  useEffect2(() => {
+    return () => {
+      detach();
+    };
+  }, [detach]);
+  return {
+    clientRef,
+    attach,
+    detach,
+    evaluate,
+    getProperties,
+    getResponseBody,
+    ping
+  };
+}
+
+// src/hooks/useLogTree.ts
+import { useState as useState2, useMemo, useCallback as useCallback3, useEffect as useEffect3, useRef as useRef3 } from "react";
+
+// src/utils/constants.ts
+var HEADER_HEIGHT = 1;
+var FOOTER_HEIGHT = 1;
+var MIN_ROWS = 12;
+var TARGET_LINES_PER_ITEM = 2;
+var LOG_MAX_LINES = 5000;
+var NET_MAX_ITEMS = 1500;
+var HEADER_LIMIT = 120;
+var BODY_LINE_LIMIT = 300;
+var ICONS = {
+  logo: "",
+  connected: "",
+  disconnected: "",
+  bullet: "",
+  expand: "",
+  collapse: "",
+  star: "",
+  page: "",
+  file: "",
+  gear: "",
+  window: "",
+  mobile: "",
+  worker: "",
+  link: "",
+  plug: "",
+  search: "",
+  zap: "",
+  list: "",
+  network: "",
+  check: "",
+  error: "",
+  warning: "",
+  info: ""
+};
+var TARGET_ICONS = {
+  page: ICONS.page,
+  background_page: ICONS.file,
+  service_worker: ICONS.gear,
+  iframe: ICONS.window,
+  webview: ICONS.mobile,
+  worker: ICONS.worker,
+  shared_worker: ICONS.link,
+  other: ICONS.plug
+};
+var LOGO_ART = `
+╔═══════════════════════════════════════════════════════════════════╗
+║                                                                   ║ 
+║   ████████╗███████╗██████╗ ███╗   ███╗██████╗ ███████╗██╗   ██╗   ║
+║   ╚══██╔══╝██╔════╝██╔══██╗████╗ ████║██╔══██╗██╔════╝██║   ██║   ║
+║      ██║   █████╗  ██████╔╝██╔████╔██║██║  ██║█████╗  ██║   ██║   ║
+║      ██║   ██╔══╝  ██╔══██╗██║╚██╔╝██║██║  ██║██╔══╝  ╚██╗ ██╔╝   ║
+║      ██║   ███████╗██║  ██║██║ ╚═╝ ██║██████╔╝███████╗ ╚████╔╝    ║
+║      ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═════╝ ╚══════╝  ╚═══╝     ║
+║                                                                   ║
+╚═══════════════════════════════════════════════════════════════════╝
+`;
+var LOGO_SUBTITLE = " Terminal DevTools for Chrome DevTools Protocol";
+var LOGO_HINT = " Press any key to continue...";
+var RAINBOW_COLORS = [
+  "#FF6B6B",
+  "#FFE66D",
+  "#4ECDC4",
+  "#45B7D1",
+  "#96CEB4",
+  "#DDA0DD",
+  "#FF6B6B"
+];
+var HEADER_GRADIENT_COLORS = ["#00D9FF", "#00FF94", "#FFE600"];
+var SUBTITLE_GRADIENT_COLORS = ["#4ECDC4", "#45B7D1", "#96CEB4"];
+var HINT_GRADIENT_COLORS = ["#888888", "#aaaaaa", "#888888"];
+
+// src/hooks/useLogTree.ts
+function useLogTree(visibleLogLines) {
+  const [logTree, setLogTree] = useState2([]);
+  const [followTail, setFollowTail] = useState2(true);
+  const [logScrollTop, setLogScrollTop] = useState2(0);
+  const [selectedLogNodeId, setSelectedLogNodeId] = useState2(null);
+  const [logSearchOpen, setLogSearchOpen] = useState2(false);
+  const [logSearchQuery, setLogSearchQuery] = useState2("");
+  const nextNodeIdRef = useRef3(0);
+  const isExpandingRef = useRef3(false);
+  const newNodeId = useCallback3(() => `n${++nextNodeIdRef.current}`, []);
+  const filteredLogTree = useMemo(() => {
+    const q = logSearchQuery.trim().toLowerCase();
+    if (!q)
+      return logTree;
+    return logTree.filter((n) => {
+      const hay = `${n.label ?? ""} ${n.text ?? ""}`.toLowerCase();
+      if (n.kind === "entry" && Array.isArray(n.args)) {
+        const argsPreview = n.args.map(formatRemoteObject).join(" ").toLowerCase();
+        if (argsPreview.includes(q))
+          return true;
+      }
+      return hay.includes(q);
+    });
+  }, [logTree, logSearchQuery]);
+  const flatLogs = useMemo(() => flattenLogTree(filteredLogTree), [filteredLogTree]);
+  const selectedLogIndex = useMemo(() => {
+    if (!flatLogs.length)
+      return -1;
+    if (!selectedLogNodeId)
+      return flatLogs.length - 1;
+    const idx = flatLogs.findIndex((l) => l.nodeId === selectedLogNodeId);
+    return idx >= 0 ? idx : flatLogs.length - 1;
+  }, [flatLogs, selectedLogNodeId]);
+  useEffect3(() => {
+    if (!flatLogs.length) {
+      setSelectedLogNodeId(null);
+      setLogScrollTop(0);
+      return;
+    }
+    if (!selectedLogNodeId) {
+      setSelectedLogNodeId(flatLogs[flatLogs.length - 1]?.nodeId ?? null);
+    }
+    if (followTail) {
+      setSelectedLogNodeId(flatLogs[flatLogs.length - 1]?.nodeId ?? null);
+      setLogScrollTop(Math.max(0, flatLogs.length - visibleLogLines));
+      return;
+    }
+    setLogScrollTop((top) => clamp(top, 0, Math.max(0, flatLogs.length - visibleLogLines)));
+  }, [flatLogs.length, followTail, visibleLogLines, selectedLogNodeId]);
+  useEffect3(() => {
+    if (logSearchQuery.trim())
+      setFollowTail(false);
+  }, [logSearchQuery]);
+  const appendTextLog = useCallback3((line) => {
+    const newLines = splitLines(line);
+    setLogTree((prev) => {
+      let nodeCounter = nextNodeIdRef.current;
+      const nodes = newLines.map((t) => ({
+        id: `n${++nodeCounter}`,
+        kind: "text",
+        text: t
+      }));
+      nextNodeIdRef.current = nodeCounter;
+      const next = prev.concat(nodes);
+      if (next.length > LOG_MAX_LINES)
+        return next.slice(next.length - LOG_MAX_LINES);
+      return next;
+    });
+  }, []);
+  const appendEntryLog = useCallback3((label, args = [], timestamp) => {
+    setLogTree((prev) => {
+      const id = `n${++nextNodeIdRef.current}`;
+      const next = prev.concat([
+        {
+          id,
+          kind: "entry",
+          label,
+          args,
+          timestamp,
+          expanded: false
+        }
+      ]);
+      if (next.length > LOG_MAX_LINES)
+        return next.slice(next.length - LOG_MAX_LINES);
+      return next;
+    });
+  }, []);
+  const clearLogs = useCallback3(() => {
+    setLogTree([]);
+    setSelectedLogNodeId(null);
+    setLogScrollTop(0);
+    setFollowTail(true);
+  }, []);
+  const ensureEntryChildren = useCallback3((node) => {
+    if (node.kind !== "entry")
+      return node;
+    if (node.children && node.children.length > 0)
+      return node;
+    const args = Array.isArray(node.args) ? node.args : [];
+    let nodeCounter = nextNodeIdRef.current;
+    const children = args.map((obj, i) => ({
+      id: `${node.id}:arg:${i}`,
+      kind: "arg",
+      object: obj,
+      expanded: false
+    }));
+    nextNodeIdRef.current = nodeCounter;
+    return { ...node, children };
+  }, []);
+  const toggleExpandSelected = useCallback3(async (getProperties) => {
+    if (isExpandingRef.current)
+      return;
+    if (!flatLogs.length)
+      return;
+    const nodeId = selectedLogNodeId ?? flatLogs[flatLogs.length - 1]?.nodeId;
+    if (!nodeId)
+      return;
+    const node = findNodeById(logTree, nodeId);
+    if (!node)
+      return;
+    const expandable = node.kind === "entry" ? Array.isArray(node.args) && node.args.length > 0 : node.kind === "arg" ? isObjectExpandable(node.object) : node.kind === "prop" ? isObjectExpandable(node.value) : false;
+    if (!expandable)
+      return;
+    const nextExpanded = !Boolean(node.expanded);
+    if (node.kind === "entry") {
+      const args = Array.isArray(node.args) ? node.args : [];
+      const firstArg = args[0];
+      const autoExpandArg0 = nextExpanded && args.length === 1 && isObjectExpandable(firstArg);
+      const arg0 = autoExpandArg0 ? firstArg : null;
+      const arg0Id = autoExpandArg0 ? `${nodeId}:arg:0` : null;
+      setLogTree((prev) => updateNodeById(prev, nodeId, (n) => {
+        const ensured = ensureEntryChildren(n);
+        if (!autoExpandArg0)
+          return { ...ensured, expanded: nextExpanded };
+        const children = Array.isArray(ensured.children) ? ensured.children : [];
+        const first = children[0];
+        const rest = children.slice(1);
+        const updatedFirst = first ? {
+          ...first,
+          expanded: true,
+          loading: true,
+          children: [
+            {
+              id: `n${++nextNodeIdRef.current}`,
+              kind: "meta",
+              text: "(loading properties...)"
+            }
+          ]
+        } : first;
+        return {
+          ...ensured,
+          expanded: nextExpanded,
+          children: updatedFirst ? [updatedFirst, ...rest] : children
+        };
+      }));
+      if (autoExpandArg0 && arg0 && arg0Id) {
+        isExpandingRef.current = true;
+        try {
+          const children = await getProperties(arg0.objectId);
+          setLogTree((prev) => updateNodeById(prev, arg0Id, (n) => ({
+            ...n,
+            loading: false,
+            children
+          })));
+        } catch (err) {
+          setLogTree((prev) => updateNodeById(prev, arg0Id, (n) => ({
+            ...n,
+            loading: false,
+            children: [
+              {
+                id: `n${++nextNodeIdRef.current}`,
+                kind: "meta",
+                text: `[props] ! ${String(err)}`
+              }
+            ]
+          })));
+        } finally {
+          isExpandingRef.current = false;
+        }
+      }
+      return;
+    }
+    setLogTree((prev) => updateNodeById(prev, nodeId, (n) => ({ ...n, expanded: nextExpanded })));
+    if (!nextExpanded)
+      return;
+    const obj = node.kind === "arg" ? node.object : node.value;
+    if (!isObjectExpandable(obj))
+      return;
+    if (Array.isArray(node.children) && node.children.length > 0 && !node.loading)
+      return;
+    isExpandingRef.current = true;
+    setLogTree((prev) => updateNodeById(prev, nodeId, (n) => ({
+      ...n,
+      loading: true,
+      children: [
+        {
+          id: `n${++nextNodeIdRef.current}`,
+          kind: "meta",
+          text: "(loading properties...)"
+        }
+      ]
+    })));
+    try {
+      const children = await getProperties(obj.objectId);
+      setLogTree((prev) => updateNodeById(prev, nodeId, (n) => ({
+        ...n,
+        loading: false,
+        children
+      })));
+    } catch (err) {
+      setLogTree((prev) => updateNodeById(prev, nodeId, (n) => ({
+        ...n,
+        loading: false,
+        children: [
+          {
+            id: `n${++nextNodeIdRef.current}`,
+            kind: "meta",
+            text: `[props] ! ${String(err)}`
+          }
+        ]
+      })));
+    } finally {
+      isExpandingRef.current = false;
+    }
+  }, [logTree, flatLogs, selectedLogNodeId, ensureEntryChildren]);
+  const collapseSelectedRegion = useCallback3(() => {
+    if (!flatLogs.length)
+      return;
+    const currentId = selectedLogNodeId ?? flatLogs[flatLogs.length - 1]?.nodeId;
+    if (!currentId)
+      return;
+    const current = findNodeById(logTree, currentId);
+    if (current?.expanded) {
+      setLogTree((prev) => updateNodeById(prev, currentId, (n) => ({ ...n, expanded: false })));
+      return;
+    }
+    const flatIndex = flatLogs.findIndex((l) => l.nodeId === currentId);
+    if (flatIndex < 0)
+      return;
+    let parentId = flatLogs[flatIndex]?.parentId ?? null;
+    while (parentId) {
+      const parentNode = findNodeById(logTree, parentId);
+      if (parentNode?.expanded) {
+        const pid = parentId;
+        setSelectedLogNodeId(pid);
+        setLogTree((prev) => updateNodeById(prev, pid, (n) => ({ ...n, expanded: false })));
+        return;
+      }
+      const parentFlatIndex = flatLogs.findIndex((l) => l.nodeId === parentId);
+      parentId = parentFlatIndex >= 0 ? flatLogs[parentFlatIndex].parentId : null;
+    }
+  }, [logTree, flatLogs, selectedLogNodeId]);
+  return {
+    logTree,
+    flatLogs,
+    selectedLogNodeId,
+    setSelectedLogNodeId,
+    followTail,
+    setFollowTail,
+    logScrollTop,
+    setLogScrollTop,
+    selectedLogIndex,
+    logSearchQuery,
+    setLogSearchQuery,
+    logSearchOpen,
+    setLogSearchOpen,
+    appendTextLog,
+    appendEntryLog,
+    clearLogs,
+    toggleExpandSelected,
+    collapseSelectedRegion,
+    newNodeId
+  };
+}
+
+// src/hooks/useNetTree.ts
+import { useState as useState3, useMemo as useMemo2, useCallback as useCallback4, useEffect as useEffect4, useRef as useRef4 } from "react";
+function useNetTree(visibleLogLines) {
+  const [netTree, setNetTree] = useState3([]);
+  const [followNetTail, setFollowNetTail] = useState3(true);
+  const [netScrollTop, setNetScrollTop] = useState3(0);
+  const [selectedNetNodeId, setSelectedNetNodeId] = useState3(null);
+  const [netSearchOpen, setNetSearchOpen] = useState3(false);
+  const [netSearchQuery, setNetSearchQuery] = useState3("");
+  const netByIdRef = useRef4(new Map);
+  const isExpandingRef = useRef4(false);
+  const nextNodeIdRef = useRef4(0);
+  const newNodeId = useCallback4(() => `net_n${++nextNodeIdRef.current}`, []);
+  const filteredNetTree = useMemo2(() => {
+    const q = netSearchQuery.trim().toLowerCase();
+    if (!q)
+      return netTree;
+    return netTree.filter((n) => {
+      const hay = `${n.label ?? ""} ${n.text ?? ""}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [netTree, netSearchQuery]);
+  const flatNet = useMemo2(() => flattenLogTree(filteredNetTree), [filteredNetTree]);
+  const selectedNetIndex = useMemo2(() => {
+    if (!flatNet.length)
+      return -1;
+    if (!selectedNetNodeId)
+      return flatNet.length - 1;
+    const idx = flatNet.findIndex((l) => l.nodeId === selectedNetNodeId);
+    return idx >= 0 ? idx : flatNet.length - 1;
+  }, [flatNet, selectedNetNodeId]);
+  useEffect4(() => {
+    if (!flatNet.length) {
+      setSelectedNetNodeId(null);
+      setNetScrollTop(0);
+      return;
+    }
+    if (!selectedNetNodeId) {
+      setSelectedNetNodeId(flatNet[flatNet.length - 1]?.nodeId ?? null);
+    }
+    if (followNetTail) {
+      setSelectedNetNodeId(flatNet[flatNet.length - 1]?.nodeId ?? null);
+      setNetScrollTop(Math.max(0, flatNet.length - visibleLogLines));
+      return;
+    }
+    setNetScrollTop((top) => clamp(top, 0, Math.max(0, flatNet.length - visibleLogLines)));
+  }, [flatNet.length, followNetTail, visibleLogLines, selectedNetNodeId]);
+  useEffect4(() => {
+    if (netSearchQuery.trim())
+      setFollowNetTail(false);
+  }, [netSearchQuery]);
+  const upsertNet = useCallback4((rid, patch) => {
+    const prev = netByIdRef.current.get(rid) ?? { requestId: rid };
+    netByIdRef.current.set(rid, { ...prev, ...patch });
+  }, []);
+  const getNetRecord = useCallback4((rid) => {
+    return netByIdRef.current.get(rid);
+  }, []);
+  const getNetLabel = useCallback4((rid) => {
+    const r = netByIdRef.current.get(rid);
+    const time = formatTime(r?.startTimestamp ?? Date.now());
+    const method = r?.method ?? "";
+    const url = r?.url ?? "";
+    const status = typeof r?.status === "number" ? r.status : undefined;
+    const tail = r?.errorText ? ` ✖ ${r.errorText}` : status != null ? ` ${status}` : "";
+    return `[${time}] ${method} ${url}${tail}`.trimEnd();
+  }, []);
+  const buildHeadersChildren = useCallback4((headers) => {
+    const entries = Object.entries(headers ?? {});
+    entries.sort((a, b) => a[0].localeCompare(b[0]));
+    const sliced = entries.slice(0, HEADER_LIMIT);
+    const children = sliced.map(([k, v]) => ({
+      id: newNodeId(),
+      kind: "text",
+      text: `${k}: ${v}`
+    }));
+    if (entries.length > HEADER_LIMIT) {
+      children.push({
+        id: newNodeId(),
+        kind: "meta",
+        text: `… (${entries.length - HEADER_LIMIT} more headers)`
+      });
+    }
+    if (children.length === 0)
+      children.push({
+        id: newNodeId(),
+        kind: "meta",
+        text: "(no headers)"
+      });
+    return children;
+  }, [newNodeId]);
+  const buildNetChildren = useCallback4((rid) => {
+    const r = netByIdRef.current.get(rid);
+    const meta = [];
+    if (r?.type)
+      meta.push({
+        id: newNodeId(),
+        kind: "text",
+        text: `type: ${r.type}`
+      });
+    if (r?.initiator)
+      meta.push({
+        id: newNodeId(),
+        kind: "text",
+        text: `initiator: ${r.initiator}`
+      });
+    if (typeof r?.encodedDataLength === "number")
+      meta.push({
+        id: newNodeId(),
+        kind: "text",
+        text: `bytes: ${r.encodedDataLength}`
+      });
+    const reqHeadersNode = {
+      id: `net:${rid}:reqHeaders`,
+      kind: "entry",
+      label: `Request Headers (${Object.keys(r?.requestHeaders ?? {}).length})`,
+      expanded: false,
+      children: buildHeadersChildren(r?.requestHeaders),
+      net: { requestId: rid, role: "headers", which: "request" }
+    };
+    const resLineParts = [];
+    if (typeof r?.status === "number")
+      resLineParts.push(String(r.status));
+    if (r?.statusText)
+      resLineParts.push(r.statusText);
+    if (r?.mimeType)
+      resLineParts.push(r.mimeType);
+    const resMeta = [];
+    if (r?.protocol)
+      resMeta.push({
+        id: newNodeId(),
+        kind: "text",
+        text: `protocol: ${r.protocol}`
+      });
+    if (r?.remoteIPAddress) {
+      const port = typeof r.remotePort === "number" ? `:${r.remotePort}` : "";
+      resMeta.push({
+        id: newNodeId(),
+        kind: "text",
+        text: `remote: ${r.remoteIPAddress}${port}`
+      });
+    }
+    if (r?.fromDiskCache)
+      resMeta.push({
+        id: newNodeId(),
+        kind: "text",
+        text: `fromDiskCache: true`
+      });
+    if (r?.fromServiceWorker)
+      resMeta.push({
+        id: newNodeId(),
+        kind: "text",
+        text: `fromServiceWorker: true`
+      });
+    const resHeadersNode = {
+      id: `net:${rid}:resHeaders`,
+      kind: "entry",
+      label: `Response Headers (${Object.keys(r?.responseHeaders ?? {}).length})`,
+      expanded: false,
+      children: buildHeadersChildren(r?.responseHeaders),
+      net: { requestId: rid, role: "headers", which: "response" }
+    };
+    const bodyNode = {
+      id: `net:${rid}:body`,
+      kind: "entry",
+      label: "Response Body",
+      expanded: false,
+      children: [
+        { id: newNodeId(), kind: "meta", text: "(press z to load)" }
+      ],
+      net: { requestId: rid, role: "body" }
+    };
+    const responseNode = {
+      id: `net:${rid}:response`,
+      kind: "entry",
+      label: `Response${resLineParts.length ? `: ${resLineParts.join(" ")}` : ""}`,
+      expanded: false,
+      children: [resHeadersNode, ...resMeta, bodyNode],
+      net: { requestId: rid, role: "response" }
+    };
+    const reqBodyNode = {
+      id: `net:${rid}:reqBody`,
+      kind: "entry",
+      label: "Request Body",
+      expanded: false,
+      children: [
+        { id: newNodeId(), kind: "meta", text: "(press z to view)" }
+      ],
+      net: { requestId: rid, role: "body", which: "request" }
+    };
+    const reqMeta = [];
+    if (r?.postData) {
+      reqMeta.push(reqBodyNode);
+    }
+    return [...meta, reqHeadersNode, ...reqMeta, responseNode];
+  }, [newNodeId, buildHeadersChildren]);
+  const ensureNetRequestNode = useCallback4((rid) => {
+    setNetTree((prev) => {
+      const id = `net:${rid}`;
+      if (findNodeById(prev, id)) {
+        return updateNodeById(prev, id, (n) => ({
+          ...n,
+          label: getNetLabel(rid)
+        }));
+      }
+      const next = prev.concat([
+        {
+          id,
+          kind: "entry",
+          label: getNetLabel(rid),
+          expanded: false,
+          net: { requestId: rid, role: "request" }
+        }
+      ]);
+      return next.length > NET_MAX_ITEMS ? next.slice(next.length - NET_MAX_ITEMS) : next;
+    });
+  }, [getNetLabel]);
+  const updateNetNodeLabel = useCallback4((rid) => {
+    const id = `net:${rid}`;
+    setNetTree((prev) => updateNodeById(prev, id, (n) => {
+      const children = Array.isArray(n.children) && n.children.length > 0 ? buildNetChildren(rid) : n.children;
+      return { ...n, label: getNetLabel(rid), children };
+    }));
+  }, [getNetLabel, buildNetChildren]);
+  const clearNetwork = useCallback4(() => {
+    setNetTree([]);
+    netByIdRef.current.clear();
+    setSelectedNetNodeId(null);
+    setNetScrollTop(0);
+    setFollowNetTail(true);
+    setNetSearchQuery("");
+  }, []);
+  const toggleNetExpandSelected = useCallback4(async (getResponseBody) => {
+    if (isExpandingRef.current)
+      return;
+    if (!flatNet.length)
+      return;
+    const nodeId = selectedNetNodeId ?? flatNet[flatNet.length - 1]?.nodeId;
+    if (!nodeId)
+      return;
+    const node = findNodeById(netTree, nodeId);
+    if (!node)
+      return;
+    const hasChildren = Array.isArray(node.children) && node.children.length > 0;
+    const expandable = node.kind === "entry" ? hasChildren || Boolean(node.net) : false;
+    if (!expandable)
+      return;
+    const nextExpanded = !Boolean(node.expanded);
+    if (node.net?.role === "request") {
+      const rid = node.net.requestId;
+      setNetTree((prev) => updateNodeById(prev, nodeId, (n) => {
+        const already = Array.isArray(n.children) && n.children.length > 0;
+        const children = already ? n.children : buildNetChildren(rid);
+        return { ...n, expanded: nextExpanded, children };
+      }));
+      return;
+    }
+    if (node.net?.role === "body" && node.net?.which === "request") {
+      const rid = node.net.requestId;
+      setNetTree((prev) => updateNodeById(prev, nodeId, (n) => ({ ...n, expanded: nextExpanded })));
+      if (!nextExpanded)
+        return;
+      const record = netByIdRef.current.get(rid);
+      if (record?.postData) {
+        const { lines, typeHint } = formatResponseBody(record.postData, false);
+        const sliced = lines.slice(0, BODY_LINE_LIMIT);
+        const children = [
+          { id: newNodeId(), kind: "meta", text: typeHint },
+          ...sliced.map((t) => ({
+            id: newNodeId(),
+            kind: "text",
+            text: t
+          }))
+        ];
+        if (lines.length > BODY_LINE_LIMIT) {
+          children.push({
+            id: newNodeId(),
+            kind: "meta",
+            text: `… (${lines.length - BODY_LINE_LIMIT} more lines)`
+          });
+        }
+        setNetTree((prev) => updateNodeById(prev, nodeId, (n) => ({ ...n, children })));
+        return;
+      }
+      return;
+    }
+    if (node.net?.role === "body") {
+      const rid = node.net.requestId;
+      setNetTree((prev) => updateNodeById(prev, nodeId, (n) => ({ ...n, expanded: nextExpanded })));
+      if (!nextExpanded)
+        return;
+      const record = netByIdRef.current.get(rid);
+      if (record?.responseBody) {
+        const rb = record.responseBody;
+        const { lines, typeHint } = formatResponseBody(rb.body, rb.base64Encoded);
+        const sliced = lines.slice(0, BODY_LINE_LIMIT);
+        const children = [
+          { id: newNodeId(), kind: "meta", text: typeHint },
+          ...sliced.map((t) => ({
+            id: newNodeId(),
+            kind: "text",
+            text: t
+          }))
+        ];
+        if (lines.length > BODY_LINE_LIMIT) {
+          children.push({
+            id: newNodeId(),
+            kind: "meta",
+            text: `… (${lines.length - BODY_LINE_LIMIT} more lines)`
+          });
+        }
+        setNetTree((prev) => updateNodeById(prev, nodeId, (n) => ({ ...n, children })));
+        return;
+      }
+      isExpandingRef.current = true;
+      setNetTree((prev) => updateNodeById(prev, nodeId, (n) => ({
+        ...n,
+        loading: true,
+        children: [
+          {
+            id: newNodeId(),
+            kind: "meta",
+            text: "(loading response body...)"
+          }
+        ]
+      })));
+      try {
+        const body = await getResponseBody(rid);
+        upsertNet(rid, { responseBody: body });
+        const { lines, typeHint } = formatResponseBody(body.body, body.base64Encoded);
+        const sliced = lines.slice(0, BODY_LINE_LIMIT);
+        const children = [
+          { id: newNodeId(), kind: "meta", text: typeHint },
+          ...sliced.map((t) => ({
+            id: newNodeId(),
+            kind: "text",
+            text: t
+          }))
+        ];
+        if (lines.length > BODY_LINE_LIMIT) {
+          children.push({
+            id: newNodeId(),
+            kind: "meta",
+            text: `… (${lines.length - BODY_LINE_LIMIT} more lines)`
+          });
+        }
+        setNetTree((prev) => updateNodeById(prev, nodeId, (n) => ({
+          ...n,
+          loading: false,
+          children
+        })));
+      } catch (err) {
+        setNetTree((prev) => updateNodeById(prev, nodeId, (n) => ({
+          ...n,
+          loading: false,
+          children: [
+            {
+              id: newNodeId(),
+              kind: "meta",
+              text: `[body] ! ${String(err)}`
+            }
+          ]
+        })));
+      } finally {
+        isExpandingRef.current = false;
+      }
+      return;
+    }
+    setNetTree((prev) => updateNodeById(prev, nodeId, (n) => ({ ...n, expanded: nextExpanded })));
+  }, [netTree, flatNet, selectedNetNodeId, buildNetChildren, upsertNet, newNodeId]);
+  const collapseNetSelectedRegion = useCallback4(() => {
+    if (!flatNet.length)
+      return;
+    const currentId = selectedNetNodeId ?? flatNet[flatNet.length - 1]?.nodeId;
+    if (!currentId)
+      return;
+    const current = findNodeById(netTree, currentId);
+    if (current?.expanded) {
+      setNetTree((prev) => updateNodeById(prev, currentId, (n) => ({ ...n, expanded: false })));
+      return;
+    }
+    const flatIndex = flatNet.findIndex((l) => l.nodeId === currentId);
+    if (flatIndex < 0)
+      return;
+    let parentId = flatNet[flatIndex]?.parentId ?? null;
+    while (parentId) {
+      const parentNode = findNodeById(netTree, parentId);
+      if (parentNode?.expanded) {
+        const pid = parentId;
+        setSelectedNetNodeId(pid);
+        setNetTree((prev) => updateNodeById(prev, pid, (n) => ({ ...n, expanded: false })));
+        return;
+      }
+      const parentFlatIndex = flatNet.findIndex((l) => l.nodeId === parentId);
+      parentId = parentFlatIndex >= 0 ? flatNet[parentFlatIndex].parentId : null;
+    }
+  }, [netTree, flatNet, selectedNetNodeId]);
+  return {
+    netTree,
+    flatNet,
+    selectedNetNodeId,
+    setSelectedNetNodeId,
+    followNetTail,
+    setFollowNetTail,
+    netScrollTop,
+    setNetScrollTop,
+    selectedNetIndex,
+    netSearchQuery,
+    setNetSearchQuery,
+    netSearchOpen,
+    setNetSearchOpen,
+    clearNetwork,
+    upsertNet,
+    ensureNetRequestNode,
+    updateNetNodeLabel,
+    toggleNetExpandSelected,
+    collapseNetSelectedRegion,
+    getNetRecord
+  };
+}
+
+// src/hooks/useClipboard.ts
+import { useCallback as useCallback5 } from "react";
+function useClipboard() {
+  const copyToClipboard = useCallback5(async (text) => {
+    const trimmed = text.replace(/\s+$/g, "") + `
+`;
+    try {
+      const { spawn } = await import("child_process");
+      const runClipboard = (args) => {
+        return new Promise((resolve) => {
+          const cmd = args[0];
+          if (!cmd) {
+            resolve(false);
+            return;
+          }
+          const proc = spawn(cmd, args.slice(1), {
+            stdio: ["pipe", "ignore", "ignore"]
+          });
+          if (proc.stdin) {
+            proc.stdin.write(trimmed);
+            proc.stdin.end();
+          }
+          proc.on("close", (code) => {
+            resolve(code === 0);
+          });
+          proc.on("error", () => {
+            resolve(false);
+          });
+        });
+      };
+      if (process.platform === "darwin") {
+        const result = await runClipboard(["pbcopy"]);
+        if (result)
+          return true;
+      }
+      const wlResult = await runClipboard(["wl-copy"]);
+      if (wlResult)
+        return true;
+      const xclipResult = await runClipboard([
+        "xclip",
+        "-selection",
+        "clipboard"
+      ]);
+      if (xclipResult)
+        return true;
+    } catch {}
+    return false;
+  }, []);
+  return { copyToClipboard };
+}
+
+// src/components/LogoScreen.tsx
+import { Box, Text, useInput } from "ink";
 
 // node_modules/chalk/source/vendor/ansi-styles/index.js
 var ANSI_BACKGROUND_OFFSET = 10;
@@ -1962,253 +3413,23 @@ gradient.summer = summer;
 gradient.rainbow = rainbow;
 gradient.pastel = pastel;
 
-// src/cdp.ts
-import CDPImport from "chrome-remote-interface";
-var CDP = CDPImport?.default ?? CDPImport;
-async function listTargets(opts) {
-  const targets = await CDP.List({ host: opts.host, port: opts.port });
-  return targets ?? [];
-}
-async function connectToTarget(target, opts) {
-  const targetOpt = target.webSocketDebuggerUrl ?? target.id;
-  return await CDP({ host: opts.host, port: opts.port, target: targetOpt });
-}
-async function safeCloseClient(client) {
-  if (!client)
-    return;
-  try {
-    await client.close();
-  } catch {}
-}
-
-// src/format.ts
-import { inspect } from "node:util";
-function toDateFromCdpTimestamp(ts) {
-  if (!Number.isFinite(ts))
-    return new Date(0);
-  const ms = ts > 1000000000000 ? ts : ts * 1000;
-  return new Date(ms);
-}
-function formatTime(ts) {
-  const d = toDateFromCdpTimestamp(ts);
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  const ss = String(d.getSeconds()).padStart(2, "0");
-  return `${hh}:${mm}:${ss}`;
-}
-function formatRemoteObject(obj) {
-  if (!obj || typeof obj !== "object")
-    return String(obj);
-  if (typeof obj.unserializableValue === "string")
-    return obj.unserializableValue;
-  if ("value" in obj) {
-    const v = obj.value;
-    if (typeof v === "string")
-      return v;
-    return inspect(v, {
-      depth: 4,
-      maxArrayLength: 50,
-      breakLength: 120,
-      colors: false,
-      compact: true
-    });
-  }
-  const className = typeof obj.className === "string" ? obj.className : undefined;
-  const description = typeof obj.description === "string" ? obj.description : undefined;
-  const preview = obj.preview;
-  if (preview && typeof preview === "object") {
-    const head = className ?? description ?? (typeof preview.description === "string" ? preview.description : undefined) ?? "Object";
-    const body = formatObjectPreview(preview);
-    return body ? `${head} ${body}` : head;
-  }
-  if (className)
-    return `#<${className}>`;
-  if (description) {
-    const m = description.match(/^\[object\s+(.+?)\]$/);
-    if (m?.[1])
-      return `#<${m[1]}>`;
-    return description;
-  }
-  if (typeof obj.type === "string")
-    return `[${obj.type}]`;
-  return inspect(obj, { depth: 2, colors: false });
-}
-function formatObjectPreview(preview) {
-  const subtype = typeof preview.subtype === "string" ? preview.subtype : undefined;
-  const overflow = Boolean(preview.overflow);
-  const props = Array.isArray(preview.properties) ? preview.properties : [];
-  const entries = Array.isArray(preview.entries) ? preview.entries : [];
-  if (subtype === "array") {
-    const items = props.filter((p) => typeof p?.name === "string" && /^\d+$/.test(p.name)).sort((a, b) => Number(a.name) - Number(b.name)).slice(0, 10).map((p) => formatPreviewValue(p));
-    const tail2 = overflow ? ", …" : "";
-    return `[${items.join(", ")}${tail2}]`;
-  }
-  if (subtype === "map") {
-    const pairs2 = entries.slice(0, 8).map((e) => {
-      const k = e?.key ? formatPreviewValue(e.key) : "?";
-      const v = e?.value ? formatPreviewValue(e.value) : "?";
-      return `${k} => ${v}`;
-    });
-    const tail2 = overflow ? ", …" : "";
-    return `{${pairs2.join(", ")}${tail2}}`;
-  }
-  if (subtype === "set") {
-    const items = entries.slice(0, 8).map((e) => e?.value ? formatPreviewValue(e.value) : "?");
-    const tail2 = overflow ? ", …" : "";
-    return `{${items.join(", ")}${tail2}}`;
-  }
-  const pairs = props.slice(0, 12).map((p) => {
-    const name = typeof p?.name === "string" ? p.name : "?";
-    return `${name}: ${formatPreviewValue(p)}`;
-  });
-  const tail = overflow ? ", …" : "";
-  return `{${pairs.join(", ")}${tail}}`;
-}
-function formatPreviewValue(p) {
-  if (p && typeof p === "object") {
-    if (typeof p.value === "string")
-      return p.value;
-    if (typeof p.description === "string")
-      return p.description;
-    if (typeof p.type === "string") {
-      if (p.type === "function")
-        return "ƒ";
-      if (p.type === "undefined")
-        return "undefined";
-      if (p.type === "object")
-        return p.subtype ? String(p.subtype) : "Object";
-      return p.type;
-    }
-  }
-  return String(p);
-}
-
-// src/targets.ts
-function pickTargetByQuery(targets, query) {
-  const q = query.trim();
-  if (!q)
-    return { index: -1 };
-  const asIndex = Number(q);
-  if (Number.isInteger(asIndex) && asIndex >= 0 && asIndex < targets.length) {
-    return { target: targets[asIndex], index: asIndex };
-  }
-  const qLower = q.toLowerCase();
-  const idx = targets.findIndex((t) => {
-    const title = (t.title ?? "").toLowerCase();
-    const url = (t.url ?? "").toLowerCase();
-    return title.includes(qLower) || url.includes(qLower);
-  });
-  return { target: idx >= 0 ? targets[idx] : undefined, index: idx };
-}
-
-// src/tui.tsx
-import { jsxDEV, Fragment } from "react/jsx-dev-runtime";
-var LOG_MAX_LINES = 5000;
-var ICONS = {
-  logo: "",
-  connected: "",
-  disconnected: "",
-  bullet: "",
-  expand: "",
-  collapse: "",
-  star: "",
-  page: "",
-  file: "",
-  gear: "",
-  window: "",
-  mobile: "",
-  worker: "",
-  link: "",
-  plug: "",
-  search: "",
-  zap: "",
-  list: "",
-  network: "",
-  check: "",
-  error: "",
-  warning: "",
-  info: ""
-};
-var LOGO_ART = `
-╔════════════════════════════════════════════════════════════════╗
-║                                                                ║
-║   ████████╗███████╗██████╗ ███╗   ███╗██████╗ ███████╗██╗   ██╗║
-║   ╚══██╔══╝██╔════╝██╔══██╗████╗ ████║██╔══██╗██╔════╝██║   ██║║
-║      ██║   █████╗  ██████╔╝██╔████╔██║██║  ██║█████╗  ██║   ██║║
-║      ██║   ██╔══╝  ██╔══██╗██║╚██╔╝██║██║  ██║██╔══╝  ╚██╗ ██╔╝║
-║      ██║   ███████╗██║  ██║██║ ╚═╝ ██║██████╔╝███████╗ ╚████╔╝ ║
-║      ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═════╝ ╚══════╝  ╚═══╝  ║
-║                                                                ║
-╚════════════════════════════════════════════════════════════════╝
-`;
-var LOGO_SUBTITLE = " Terminal DevTools for Chrome DevTools Protocol";
-var LOGO_HINT = " Press any key to continue...";
-var rainbowGradient = dist_default([
-  "#FF6B6B",
-  "#FFE66D",
-  "#4ECDC4",
-  "#45B7D1",
-  "#96CEB4",
-  "#DDA0DD",
-  "#FF6B6B"
-]);
-var headerGradient = dist_default(["#00D9FF", "#00FF94", "#FFE600"]);
-var TARGET_ICONS = {
-  page: ICONS.page,
-  background_page: ICONS.file,
-  service_worker: ICONS.gear,
-  iframe: ICONS.window,
-  webview: ICONS.mobile,
-  worker: ICONS.worker,
-  shared_worker: ICONS.link,
-  other: ICONS.plug
-};
-var getTargetIcon = (type) => {
-  return TARGET_ICONS[type] ?? TARGET_ICONS.other ?? ICONS.plug;
-};
-var getTargetColor = (type, selected, attached) => {
-  if (attached)
-    return "green";
-  if (selected)
-    return "cyan";
-  switch (type) {
-    case "page":
-      return "white";
-    case "service_worker":
-      return "yellow";
-    case "background_page":
-      return "magenta";
-    case "iframe":
-      return "blue";
-    default:
-      return;
-  }
-};
-function LogoScreen({
-  onDismiss
-}) {
+// src/components/LogoScreen.tsx
+import { jsxDEV } from "react/jsx-dev-runtime";
+function LogoScreen({ onDismiss }) {
   useInput(() => {
     onDismiss();
   });
   const logoLines = LOGO_ART.trim().split(`
 `);
-  const colors = [
-    "#FF6B6B",
-    "#FFE66D",
-    "#4ECDC4",
-    "#45B7D1",
-    "#96CEB4",
-    "#DDA0DD"
-  ];
   const coloredLines = logoLines.map((line, i) => {
-    const c1 = colors[i % colors.length];
-    const c2 = colors[(i + 1) % colors.length];
-    const c3 = colors[(i + 2) % colors.length];
+    const c1 = RAINBOW_COLORS[i % RAINBOW_COLORS.length];
+    const c2 = RAINBOW_COLORS[(i + 1) % RAINBOW_COLORS.length];
+    const c3 = RAINBOW_COLORS[(i + 2) % RAINBOW_COLORS.length];
     const lineGradient = dist_default([c1, c2, c3]);
     return lineGradient(line);
   });
-  const subtitleColored = dist_default(["#4ECDC4", "#45B7D1", "#96CEB4"])(LOGO_SUBTITLE);
-  const hintColored = dist_default(["#888888", "#aaaaaa", "#888888"])(LOGO_HINT);
+  const subtitleColored = dist_default([...SUBTITLE_GRADIENT_COLORS])(LOGO_SUBTITLE);
+  const hintColored = dist_default([...HINT_GRADIENT_COLORS])(LOGO_HINT);
   return /* @__PURE__ */ jsxDEV(Box, {
     flexDirection: "column",
     width: "100%",
@@ -2234,58 +3455,334 @@ function LogoScreen({
     ]
   }, undefined, true, undefined, this);
 }
-var HEADER_HEIGHT = 1;
-var FOOTER_HEIGHT = 1;
-var MIN_ROWS = 12;
-var TARGET_LINES_PER_ITEM = 2;
-function splitLines(s) {
-  return String(s).split(`
-`);
+
+// src/components/Header.tsx
+import { Box as Box2, Text as Text2 } from "ink";
+import { jsxDEV as jsxDEV2, Fragment } from "react/jsx-dev-runtime";
+var headerGradient = dist_default([...HEADER_GRADIENT_COLORS]);
+function Header({
+  host,
+  port,
+  connected,
+  targetsCount,
+  attachedTitle,
+  columns
+}) {
+  const headerTitle = headerGradient(`${ICONS.logo} TermDev`);
+  return /* @__PURE__ */ jsxDEV2(Box2, {
+    height: 1,
+    children: [
+      /* @__PURE__ */ jsxDEV2(Text2, {
+        children: headerTitle
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV2(Text2, {
+        dimColor: true,
+        children: " │ "
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV2(Text2, {
+        color: connected ? "green" : "yellow",
+        children: connected ? ICONS.connected : ICONS.disconnected
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV2(Text2, {
+        color: connected ? "green" : "yellow",
+        children: connected ? " connected" : " waiting"
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV2(Text2, {
+        dimColor: true,
+        children: " │ "
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV2(Text2, {
+        dimColor: true,
+        children: [
+          host,
+          ":",
+          port
+        ]
+      }, undefined, true, undefined, this),
+      /* @__PURE__ */ jsxDEV2(Text2, {
+        dimColor: true,
+        children: " │ "
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV2(Text2, {
+        color: "cyan",
+        children: [
+          ICONS.list,
+          " "
+        ]
+      }, undefined, true, undefined, this),
+      /* @__PURE__ */ jsxDEV2(Text2, {
+        color: "cyanBright",
+        bold: true,
+        children: targetsCount
+      }, undefined, false, undefined, this),
+      attachedTitle ? /* @__PURE__ */ jsxDEV2(Fragment, {
+        children: [
+          /* @__PURE__ */ jsxDEV2(Text2, {
+            dimColor: true,
+            children: " │ "
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV2(Text2, {
+            color: "green",
+            children: [
+              ICONS.plug,
+              " "
+            ]
+          }, undefined, true, undefined, this),
+          /* @__PURE__ */ jsxDEV2(Text2, {
+            color: "green",
+            children: truncate(attachedTitle, Math.max(10, columns - 65))
+          }, undefined, false, undefined, this)
+        ]
+      }, undefined, true, undefined, this) : null
+    ]
+  }, undefined, true, undefined, this);
 }
-function clamp(n, min, max) {
-  return Math.max(min, Math.min(max, n));
+
+// src/components/Footer.tsx
+import { Box as Box3, Text as Text3 } from "ink";
+import { jsxDEV as jsxDEV3 } from "react/jsx-dev-runtime";
+function Footer({ connected, status, columns }) {
+  return /* @__PURE__ */ jsxDEV3(Box3, {
+    children: [
+      /* @__PURE__ */ jsxDEV3(Text3, {
+        backgroundColor: "gray",
+        color: "black",
+        children: [
+          " ",
+          /* @__PURE__ */ jsxDEV3(Text3, {
+            color: connected ? "green" : "yellow",
+            children: connected ? ICONS.connected : ICONS.disconnected
+          }, undefined, false, undefined, this),
+          " "
+        ]
+      }, undefined, true, undefined, this),
+      /* @__PURE__ */ jsxDEV3(Text3, {
+        backgroundColor: "gray",
+        color: "black",
+        children: truncate(status, Math.max(10, columns - 60))
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV3(Text3, {
+        backgroundColor: "gray",
+        color: "black",
+        children: [
+          " ",
+          "│",
+          " "
+        ]
+      }, undefined, true, undefined, this),
+      /* @__PURE__ */ jsxDEV3(Text3, {
+        backgroundColor: "gray",
+        color: "blue",
+        bold: true,
+        children: "tab"
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV3(Text3, {
+        backgroundColor: "gray",
+        color: "black",
+        children: [
+          " ",
+          "focus",
+          " "
+        ]
+      }, undefined, true, undefined, this),
+      /* @__PURE__ */ jsxDEV3(Text3, {
+        backgroundColor: "gray",
+        color: "blue",
+        bold: true,
+        children: "r"
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV3(Text3, {
+        backgroundColor: "gray",
+        color: "black",
+        children: [
+          " ",
+          "refresh",
+          " "
+        ]
+      }, undefined, true, undefined, this),
+      /* @__PURE__ */ jsxDEV3(Text3, {
+        backgroundColor: "gray",
+        color: "blue",
+        bold: true,
+        children: "c"
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV3(Text3, {
+        backgroundColor: "gray",
+        color: "black",
+        children: [
+          " ",
+          "clear",
+          " "
+        ]
+      }, undefined, true, undefined, this),
+      /* @__PURE__ */ jsxDEV3(Text3, {
+        backgroundColor: "gray",
+        color: "blue",
+        bold: true,
+        children: "q"
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV3(Text3, {
+        backgroundColor: "gray",
+        color: "black",
+        children: [
+          " ",
+          "quit",
+          " "
+        ]
+      }, undefined, true, undefined, this),
+      /* @__PURE__ */ jsxDEV3(Text3, {
+        backgroundColor: "gray",
+        color: "black",
+        children: " ".repeat(Math.max(0, columns - 80))
+      }, undefined, false, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
 }
-function useTerminalSizeFallback() {
-  const { stdout } = useStdout();
-  const rows = stdout?.rows;
-  const columns = stdout?.columns;
-  return {
-    rows: typeof rows === "number" && rows > 0 ? rows : 30,
-    columns: typeof columns === "number" && columns > 0 ? columns : 100
-  };
+
+// src/components/TargetList.tsx
+import { useMemo as useMemo3 } from "react";
+import { Box as Box4, Text as Text4 } from "ink";
+import { jsxDEV as jsxDEV4 } from "react/jsx-dev-runtime";
+function getTargetIcon(type) {
+  return TARGET_ICONS[type] ?? TARGET_ICONS.other ?? ICONS.plug;
 }
-function truncate(s, max) {
-  if (max <= 0)
-    return "";
-  if (s.length <= max)
-    return s;
-  if (max === 1)
-    return "…";
-  return `${s.slice(0, max - 1)}…`;
-}
-function tryPrettifyJson(body) {
-  const trimmed = body.trim();
-  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
-    return { formatted: body, isJson: false };
+function getTargetColor(type, selected, attached) {
+  if (attached)
+    return "green";
+  if (selected)
+    return "cyan";
+  switch (type) {
+    case "page":
+      return "white";
+    case "service_worker":
+      return "yellow";
+    case "background_page":
+      return "magenta";
+    case "iframe":
+      return "blue";
+    default:
+      return;
   }
-  try {
-    const parsed = JSON.parse(trimmed);
-    const pretty = JSON.stringify(parsed, null, 2);
-    return { formatted: pretty, isJson: true };
-  } catch {
-    return { formatted: body, isJson: false };
-  }
 }
-function formatResponseBody(body, base64Encoded) {
-  if (base64Encoded) {
-    const preview = body.length > 100 ? body.slice(0, 100) + "..." : body;
-    return { lines: [preview], typeHint: "(base64 encoded)" };
-  }
-  const { formatted, isJson } = tryPrettifyJson(body);
-  const lines = splitLines(formatted);
-  const typeHint = isJson ? "(json, formatted)" : "(text)";
-  return { lines, typeHint };
+function TargetList({
+  targets,
+  selectedIndex,
+  attachedIndex,
+  focused,
+  panelInnerHeight,
+  columns,
+  targetScrollTop
+}) {
+  const visibleTargetItems = Math.max(1, Math.floor((panelInnerHeight - 1) / TARGET_LINES_PER_ITEM));
+  const targetsViewport = useMemo3(() => {
+    if (!targets.length)
+      return [];
+    const slice = targets.slice(targetScrollTop, targetScrollTop + visibleTargetItems);
+    return slice.map((t, offset) => {
+      const idx = targetScrollTop + offset;
+      const selected = idx === selectedIndex;
+      const attached = idx === attachedIndex;
+      const title = (t.title ?? "").trim() || "(no title)";
+      const url = (t.url ?? "").trim();
+      const type = (t.type ?? "").trim();
+      const icon = getTargetIcon(type);
+      const color = getTargetColor(type, selected, attached);
+      const statusIcon = attached ? "●" : selected ? "◦" : " ";
+      const line1Prefix = `${icon} ${statusIcon} ${String(idx).padStart(2, " ")}`;
+      const line1 = `${line1Prefix} ${title}`;
+      const meta = [type ? `${type}` : "", url].filter(Boolean).join(" · ");
+      const line2 = `      ${meta}`;
+      const maxWidth = Math.max(10, Math.floor(columns * 0.33) - 6);
+      return {
+        key: t.id,
+        lines: [truncate(line1, maxWidth), truncate(line2, maxWidth)],
+        selected,
+        attached,
+        type,
+        icon,
+        color
+      };
+    });
+  }, [
+    targets,
+    targetScrollTop,
+    visibleTargetItems,
+    selectedIndex,
+    attachedIndex,
+    columns
+  ]);
+  return /* @__PURE__ */ jsxDEV4(Box4, {
+    flexDirection: "column",
+    width: "33%",
+    borderStyle: "round",
+    borderColor: focused ? "green" : "gray",
+    paddingX: 1,
+    paddingY: 0,
+    marginRight: 1,
+    children: [
+      /* @__PURE__ */ jsxDEV4(Text4, {
+        bold: true,
+        color: focused ? "cyan" : undefined,
+        children: [
+          ICONS.list,
+          " Targets",
+          focused ? ` ${ICONS.star}` : "",
+          " ",
+          /* @__PURE__ */ jsxDEV4(Text4, {
+            dimColor: true,
+            children: "(↑↓ Enter)"
+          }, undefined, false, undefined, this)
+        ]
+      }, undefined, true, undefined, this),
+      targets.length === 0 ? /* @__PURE__ */ jsxDEV4(Text4, {
+        dimColor: true,
+        children: [
+          "(no targets)",
+          `
+Press r to refresh`
+        ]
+      }, undefined, true, undefined, this) : /* @__PURE__ */ jsxDEV4(Box4, {
+        flexDirection: "column",
+        children: [
+          targetsViewport.map((item) => /* @__PURE__ */ jsxDEV4(Box4, {
+            flexDirection: "column",
+            children: [
+              /* @__PURE__ */ jsxDEV4(Text4, {
+                color: item.color,
+                bold: item.selected,
+                inverse: item.selected,
+                children: item.lines[0]
+              }, undefined, false, undefined, this),
+              /* @__PURE__ */ jsxDEV4(Text4, {
+                dimColor: true,
+                color: item.attached ? "green" : undefined,
+                children: item.lines[1]
+              }, undefined, false, undefined, this)
+            ]
+          }, item.key, true, undefined, this)),
+          targets.length > visibleTargetItems ? /* @__PURE__ */ jsxDEV4(Text4, {
+            dimColor: true,
+            children: [
+              ICONS.bullet,
+              " ",
+              targetScrollTop + 1,
+              "-",
+              Math.min(targetScrollTop + visibleTargetItems, targets.length),
+              "/",
+              targets.length
+            ]
+          }, undefined, true, undefined, this) : null
+        ]
+      }, undefined, true, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
 }
+
+// src/components/RightPanel.tsx
+import { useMemo as useMemo4 } from "react";
+import { Box as Box5, Text as Text5 } from "ink";
+import TextInput from "ink-text-input";
+import { jsxDEV as jsxDEV5 } from "react/jsx-dev-runtime";
 function classifyLogLine(line) {
   const l = line.toLowerCase();
   if (l.includes("exception") || l.includes("console.error") || l.includes("log.error"))
@@ -2314,296 +3811,437 @@ function classifyLogLine(line) {
     return { color: "yellow" };
   return { dim: false };
 }
-function isObjectExpandable(obj) {
-  return Boolean(obj && typeof obj === "object" && typeof obj.objectId === "string" && obj.objectId.length > 0);
-}
-function flattenLogTree(nodes, parentId = null, indent = 0) {
-  const out = [];
-  for (const n of nodes) {
-    const expandable = n.kind === "entry" ? Array.isArray(n.args) && n.args.length > 0 || Array.isArray(n.children) && n.children.length > 0 || Boolean(n.loading) : n.kind === "arg" ? isObjectExpandable(n.object) : n.kind === "prop" ? isObjectExpandable(n.value) : false;
-    const expanded = Boolean(n.expanded);
-    const text = (() => {
-      if (n.kind === "text")
-        return n.text ?? "";
-      if (n.kind === "meta")
-        return n.text ?? "";
-      if (n.kind === "entry") {
-        const label = n.label ?? "";
-        const args = Array.isArray(n.args) ? n.args : [];
-        const preview = args.map(formatRemoteObject).join(" ");
-        return preview ? `${label} ${preview}` : label;
-      }
-      if (n.kind === "arg") {
-        const obj = n.object;
-        return obj ? formatRemoteObject(obj) : "";
-      }
-      if (n.kind === "prop") {
-        const name = n.name ?? "?";
-        const v = n.value;
-        return `${name}: ${v ? formatRemoteObject(v) : "undefined"}`;
-      }
-      return n.text ?? "";
-    })();
-    out.push({ nodeId: n.id, parentId, indent, text, expandable, expanded });
-    if (expanded && Array.isArray(n.children) && n.children.length > 0) {
-      out.push(...flattenLogTree(n.children, n.id, indent + 1));
-    }
-  }
-  return out;
-}
-function updateNodeById(nodes, id, updater) {
-  let changed = false;
-  const next = nodes.map((n) => {
-    if (n.id === id) {
-      changed = true;
-      return updater(n);
-    }
-    if (n.children && n.children.length > 0) {
-      const updatedChildren = updateNodeById(n.children, id, updater);
-      if (updatedChildren !== n.children) {
-        changed = true;
-        return { ...n, children: updatedChildren };
-      }
-    }
-    return n;
-  });
-  return changed ? next : nodes;
-}
-function findNodeById(nodes, id) {
-  for (const n of nodes) {
-    if (n.id === id)
-      return n;
-    if (n.children) {
-      const found = findNodeById(n.children, id);
-      if (found)
-        return found;
-    }
-  }
-  return;
-}
-function serializeNodeDeep(node, indent = 0) {
-  const pad = "  ".repeat(indent);
-  const line = (() => {
-    if (node.kind === "text" || node.kind === "meta")
-      return `${pad}${node.text ?? ""}`.trimEnd();
-    if (node.kind === "entry") {
-      const label = node.label ?? "";
-      const args = Array.isArray(node.args) ? node.args : [];
-      const preview = args.map(formatRemoteObject).join(" ");
-      return `${pad}${preview ? `${label} ${preview}`.trimEnd() : label}`.trimEnd();
-    }
-    if (node.kind === "arg") {
-      return `${pad}${node.object ? formatRemoteObject(node.object) : ""}`.trimEnd();
-    }
-    if (node.kind === "prop") {
-      const name = node.name ?? "?";
-      return `${pad}${name}: ${node.value ? formatRemoteObject(node.value) : "undefined"}`.trimEnd();
-    }
-    return `${pad}${node.text ?? ""}`.trimEnd();
-  })();
-  const out = [line];
-  const children = Array.isArray(node.children) ? node.children : [];
-  for (const c of children)
-    out.push(...serializeNodeDeep(c, indent + 1));
-  return out;
-}
-function serializeBodyOnly(node) {
-  if (node.kind === "meta") {
-    return [];
-  }
-  if (node.kind === "text") {
-    return [node.text ?? ""];
-  }
-  if (node.kind === "entry" && node.net?.role === "body") {
-    const children2 = Array.isArray(node.children) ? node.children : [];
-    const out2 = [];
-    for (const c of children2) {
-      out2.push(...serializeBodyOnly(c));
-    }
-    return out2;
-  }
-  const children = Array.isArray(node.children) ? node.children : [];
-  const out = [];
-  for (const c of children) {
-    out.push(...serializeBodyOnly(c));
-  }
-  return out;
-}
-async function copyToClipboard(text) {
-  const trimmed = text.replace(/\s+$/g, "") + `
-`;
-  try {
-    const { spawn } = await import("child_process");
-    const runClipboard = (args) => {
-      return new Promise((resolve) => {
-        const cmd = args[0];
-        if (!cmd) {
-          resolve(false);
-          return;
-        }
-        const proc = spawn(cmd, args.slice(1), {
-          stdio: ["pipe", "ignore", "ignore"]
-        });
-        if (proc.stdin) {
-          proc.stdin.write(trimmed);
-          proc.stdin.end();
-        }
-        proc.on("close", (code) => {
-          resolve(code === 0);
-        });
-        proc.on("error", () => {
-          resolve(false);
-        });
-      });
+function RightPanel({
+  focused,
+  rightTab,
+  flatLogs,
+  flatNet,
+  selectedLogNodeId,
+  selectedNetNodeId,
+  logScrollTop,
+  netScrollTop,
+  followTail,
+  followNetTail,
+  visibleLogLines,
+  evalOpen,
+  evalText,
+  setEvalText,
+  logSearchOpen,
+  logSearchQuery,
+  setLogSearchQuery,
+  netSearchOpen,
+  netSearchQuery,
+  setNetSearchQuery,
+  columns
+}) {
+  const activeFlat = rightTab === "logs" ? flatLogs : flatNet;
+  const activeScrollTop = rightTab === "logs" ? logScrollTop : netScrollTop;
+  const activeSelectedId = rightTab === "logs" ? selectedLogNodeId : selectedNetNodeId;
+  const activeFollow = rightTab === "logs" ? followTail : followNetTail;
+  const viewport = useMemo4(() => {
+    if (!activeFlat.length)
+      return { start: 0, endExclusive: 0, lines: [] };
+    const start = clamp(activeScrollTop, 0, Math.max(0, activeFlat.length - visibleLogLines));
+    const endExclusive = clamp(start + visibleLogLines, 0, activeFlat.length);
+    return {
+      start,
+      endExclusive,
+      lines: activeFlat.slice(start, endExclusive)
     };
-    if (process.platform === "darwin") {
-      const result = await runClipboard(["pbcopy"]);
-      if (result)
-        return true;
-    }
-    const wlResult = await runClipboard(["wl-copy"]);
-    if (wlResult)
-      return true;
-    const xclipResult = await runClipboard([
-      "xclip",
-      "-selection",
-      "clipboard"
-    ]);
-    if (xclipResult)
-      return true;
-  } catch {}
-  return false;
+  }, [activeFlat, activeScrollTop, visibleLogLines]);
+  return /* @__PURE__ */ jsxDEV5(Box5, {
+    flexDirection: "column",
+    width: "67%",
+    borderStyle: "round",
+    borderColor: focused ? "green" : "gray",
+    paddingX: 1,
+    children: [
+      /* @__PURE__ */ jsxDEV5(Text5, {
+        bold: true,
+        children: [
+          /* @__PURE__ */ jsxDEV5(Text5, {
+            color: rightTab === "logs" ? "yellowBright" : "gray",
+            bold: rightTab === "logs",
+            children: [
+              ICONS.list,
+              " Logs"
+            ]
+          }, undefined, true, undefined, this),
+          /* @__PURE__ */ jsxDEV5(Text5, {
+            dimColor: true,
+            children: " │ "
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV5(Text5, {
+            color: rightTab === "network" ? "magentaBright" : "gray",
+            bold: rightTab === "network",
+            children: [
+              ICONS.network,
+              " Network"
+            ]
+          }, undefined, true, undefined, this),
+          /* @__PURE__ */ jsxDEV5(Text5, {
+            dimColor: true,
+            children: "  "
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV5(Text5, {
+            color: "gray",
+            children: [
+              "(",
+              viewport.start + 1,
+              "-",
+              viewport.endExclusive,
+              "/",
+              activeFlat.length,
+              ")"
+            ]
+          }, undefined, true, undefined, this),
+          /* @__PURE__ */ jsxDEV5(Text5, {
+            color: activeFollow ? "green" : "yellow",
+            children: activeFollow ? ` ${ICONS.connected} follow` : ` ${ICONS.disconnected} paused`
+          }, undefined, false, undefined, this),
+          focused ? /* @__PURE__ */ jsxDEV5(Text5, {
+            color: "greenBright",
+            children: [
+              " ",
+              ICONS.star
+            ]
+          }, undefined, true, undefined, this) : null
+        ]
+      }, undefined, true, undefined, this),
+      /* @__PURE__ */ jsxDEV5(Box5, {
+        flexDirection: "column",
+        children: viewport.lines.map((line, i) => {
+          const idx = viewport.start + i;
+          const isSelected = focused && activeFlat[idx]?.nodeId === activeSelectedId;
+          const icon = line.expandable ? line.expanded ? ICONS.expand : ICONS.collapse : " ";
+          const prefix = `${" ".repeat(line.indent * 2)}${icon} `;
+          const rendered = `${prefix}${line.text}`;
+          const style = classifyLogLine(line.text);
+          return /* @__PURE__ */ jsxDEV5(Text5, {
+            inverse: isSelected,
+            color: style.color,
+            dimColor: style.dim || !isSelected && !focused,
+            children: truncate(rendered, Math.max(10, Math.floor(columns * 0.67) - 6))
+          }, line.nodeId, false, undefined, this);
+        })
+      }, undefined, false, undefined, this),
+      evalOpen ? /* @__PURE__ */ jsxDEV5(Box5, {
+        marginTop: 0,
+        children: [
+          /* @__PURE__ */ jsxDEV5(Text5, {
+            color: "greenBright",
+            bold: true,
+            children: [
+              ICONS.zap,
+              " js›",
+              " "
+            ]
+          }, undefined, true, undefined, this),
+          /* @__PURE__ */ jsxDEV5(TextInput, {
+            value: evalText,
+            onChange: setEvalText
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV5(Text5, {
+            dimColor: true,
+            children: " (Enter run, Esc cancel)"
+          }, undefined, false, undefined, this)
+        ]
+      }, undefined, true, undefined, this) : netSearchOpen ? /* @__PURE__ */ jsxDEV5(Box5, {
+        marginTop: 0,
+        children: [
+          /* @__PURE__ */ jsxDEV5(Text5, {
+            color: "cyanBright",
+            bold: true,
+            children: [
+              ICONS.search,
+              " /",
+              " "
+            ]
+          }, undefined, true, undefined, this),
+          /* @__PURE__ */ jsxDEV5(TextInput, {
+            value: netSearchQuery,
+            onChange: setNetSearchQuery
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV5(Text5, {
+            dimColor: true,
+            children: " (Enter done, Esc close, Ctrl+U clear)"
+          }, undefined, false, undefined, this)
+        ]
+      }, undefined, true, undefined, this) : logSearchOpen ? /* @__PURE__ */ jsxDEV5(Box5, {
+        marginTop: 0,
+        children: [
+          /* @__PURE__ */ jsxDEV5(Text5, {
+            color: "cyanBright",
+            bold: true,
+            children: [
+              ICONS.search,
+              " /",
+              " "
+            ]
+          }, undefined, true, undefined, this),
+          /* @__PURE__ */ jsxDEV5(TextInput, {
+            value: logSearchQuery,
+            onChange: setLogSearchQuery
+          }, undefined, false, undefined, this),
+          /* @__PURE__ */ jsxDEV5(Text5, {
+            dimColor: true,
+            children: " (Enter done, Esc close, Ctrl+U clear)"
+          }, undefined, false, undefined, this)
+        ]
+      }, undefined, true, undefined, this) : /* @__PURE__ */ jsxDEV5(Text5, {
+        dimColor: true,
+        children: [
+          /* @__PURE__ */ jsxDEV5(Text5, {
+            color: "yellow",
+            children: "l"
+          }, undefined, false, undefined, this),
+          " logs ",
+          /* @__PURE__ */ jsxDEV5(Text5, {
+            color: "yellow",
+            children: "n"
+          }, undefined, false, undefined, this),
+          " ",
+          "network ",
+          /* @__PURE__ */ jsxDEV5(Text5, {
+            color: "yellow",
+            children: "j/k"
+          }, undefined, false, undefined, this),
+          " select",
+          " ",
+          /* @__PURE__ */ jsxDEV5(Text5, {
+            color: "yellow",
+            children: "z"
+          }, undefined, false, undefined, this),
+          " expand ",
+          /* @__PURE__ */ jsxDEV5(Text5, {
+            color: "yellow",
+            children: "/"
+          }, undefined, false, undefined, this),
+          " ",
+          "filter ",
+          /* @__PURE__ */ jsxDEV5(Text5, {
+            color: "yellow",
+            children: ":"
+          }, undefined, false, undefined, this),
+          " eval"
+        ]
+      }, undefined, true, undefined, this)
+    ]
+  }, undefined, true, undefined, this);
+}
+
+// src/tui.tsx
+import { jsxDEV as jsxDEV6 } from "react/jsx-dev-runtime";
+function useTerminalSizeFallback() {
+  const { stdout } = useStdout();
+  const rows = stdout?.rows;
+  const columns = stdout?.columns;
+  return {
+    rows: typeof rows === "number" && rows > 0 ? rows : 30,
+    columns: typeof columns === "number" && columns > 0 ? columns : 100
+  };
 }
 function App({ opts }) {
   const { exit } = useApp();
   const { rows, columns } = useTerminalSizeFallback();
   const safeRows = Math.max(MIN_ROWS, rows);
-  const [showLogo, setShowLogo] = useState(true);
-  const [host, setHost] = useState(opts.host);
-  const [port] = useState(opts.port);
-  const [targets, setTargets] = useState([]);
-  const [selectedIndex, setSelectedIndex] = useState(0);
-  const [attachedIndex, setAttachedIndex] = useState(null);
-  const [status, setStatus] = useState(`connecting to ${opts.host}:${opts.port}...`);
-  const [focus, setFocus] = useState("targets");
-  const [rightTab, setRightTab] = useState("logs");
-  const [logTree, setLogTree] = useState([]);
-  const [followTail, setFollowTail] = useState(true);
-  const [logScrollTop, setLogScrollTop] = useState(0);
-  const [selectedLogNodeId, setSelectedLogNodeId] = useState(null);
-  const [netTree, setNetTree] = useState([]);
-  const [followNetTail, setFollowNetTail] = useState(true);
-  const [netScrollTop, setNetScrollTop] = useState(0);
-  const [selectedNetNodeId, setSelectedNetNodeId] = useState(null);
-  const [netSearchOpen, setNetSearchOpen] = useState(false);
-  const [netSearchQuery, setNetSearchQuery] = useState("");
-  const [logSearchOpen, setLogSearchOpen] = useState(false);
-  const [logSearchQuery, setLogSearchQuery] = useState("");
-  const [targetScrollTop, setTargetScrollTop] = useState(0);
-  const [evalOpen, setEvalOpen] = useState(false);
-  const [evalText, setEvalText] = useState("");
-  const clientRef = useRef(null);
-  const hasShownConnectHelpRef = useRef(false);
-  const isAttachingRef = useRef(false);
-  const lastFetchErrorRef = useRef(null);
-  const isExpandingRef = useRef(false);
-  const selectedTargetIdRef = useRef(null);
-  const attachedTargetIdRef = useRef(null);
-  const nextNodeIdRef = useRef(0);
-  const newNodeId = () => `n${++nextNodeIdRef.current}`;
-  useEffect(() => {
-    selectedTargetIdRef.current = targets[selectedIndex]?.id ?? null;
-  }, [targets, selectedIndex]);
-  useEffect(() => {
-    attachedTargetIdRef.current = attachedIndex == null ? null : targets[attachedIndex]?.id ?? null;
-  }, [targets, attachedIndex]);
+  const [showLogo, setShowLogo] = useState4(true);
+  const [focus, setFocus] = useState4("targets");
+  const [rightTab, setRightTab] = useState4("logs");
+  const [evalOpen, setEvalOpen] = useState4(false);
+  const [evalText, setEvalText] = useState4("");
+  const [targetScrollTop, setTargetScrollTop] = useState4(0);
+  const isAttachingRef = useRef5(false);
   const mainHeight = Math.max(1, safeRows - HEADER_HEIGHT - FOOTER_HEIGHT);
   const panelInnerHeight = Math.max(3, mainHeight - 2);
-  const rightReserved = evalOpen || netSearchOpen || logSearchOpen ? 2 : 1;
+  const rightReserved = evalOpen ? 2 : 1;
   const visibleLogLines = Math.max(3, panelInnerHeight - 1 - rightReserved);
   const visibleTargetItems = Math.max(1, Math.floor((panelInnerHeight - 1) / TARGET_LINES_PER_ITEM));
-  const filteredLogTree = useMemo(() => {
-    const q = logSearchQuery.trim().toLowerCase();
-    if (!q)
-      return logTree;
-    return logTree.filter((n) => {
-      const hay = `${n.label ?? ""} ${n.text ?? ""}`.toLowerCase();
-      if (n.kind === "entry" && Array.isArray(n.args)) {
-        const argsPreview = n.args.map(formatRemoteObject).join(" ").toLowerCase();
-        if (argsPreview.includes(q))
-          return true;
+  const logTreeHook = useLogTree(visibleLogLines);
+  const {
+    flatLogs,
+    selectedLogNodeId,
+    setSelectedLogNodeId,
+    followTail,
+    setFollowTail,
+    logScrollTop,
+    setLogScrollTop,
+    selectedLogIndex,
+    logSearchQuery,
+    setLogSearchQuery,
+    logSearchOpen,
+    setLogSearchOpen,
+    appendTextLog,
+    appendEntryLog,
+    clearLogs,
+    toggleExpandSelected,
+    collapseSelectedRegion,
+    logTree
+  } = logTreeHook;
+  const netTreeHook = useNetTree(visibleLogLines);
+  const {
+    flatNet,
+    selectedNetNodeId,
+    setSelectedNetNodeId,
+    followNetTail,
+    setFollowNetTail,
+    netScrollTop,
+    setNetScrollTop,
+    selectedNetIndex,
+    netSearchQuery,
+    setNetSearchQuery,
+    netSearchOpen,
+    setNetSearchOpen,
+    clearNetwork,
+    upsertNet,
+    ensureNetRequestNode,
+    updateNetNodeLabel,
+    toggleNetExpandSelected,
+    collapseNetSelectedRegion,
+    netTree
+  } = netTreeHook;
+  const { copyToClipboard } = useClipboard();
+  const targetsHook = useTargets(opts.host, opts.port, opts.pollMs, opts.targetQuery, appendTextLog);
+  const {
+    targets,
+    selectedIndex,
+    setSelectedIndex,
+    attachedIndex,
+    setAttachedIndex,
+    status,
+    setStatus,
+    host,
+    refreshTargets,
+    getAutoAttachTarget
+  } = targetsHook;
+  const cdpCallbacks = useMemo5(() => ({
+    onLog: (label, args, timestamp) => {
+      const time = formatTime(timestamp ?? Date.now());
+      appendEntryLog(`[${time}] ${label}`, args, timestamp);
+    },
+    onTextLog: (text) => {
+      const time = formatTime(Date.now());
+      appendTextLog(`[${time}] ${text}`);
+    },
+    onNetworkRequest: (rid, patch) => {
+      upsertNet(rid, patch);
+      ensureNetRequestNode(rid);
+    },
+    onNetworkResponse: (rid, patch) => {
+      upsertNet(rid, patch);
+      ensureNetRequestNode(rid);
+      updateNetNodeLabel(rid);
+    },
+    onNetworkFinished: (rid, patch) => {
+      upsertNet(rid, patch);
+      ensureNetRequestNode(rid);
+      updateNetNodeLabel(rid);
+    },
+    onNetworkFailed: (rid, patch) => {
+      upsertNet(rid, patch);
+      ensureNetRequestNode(rid);
+      updateNetNodeLabel(rid);
+    },
+    onDisconnect: () => {
+      appendTextLog("[transport] disconnected");
+      setStatus("disconnected (press r to refresh targets)");
+      setAttachedIndex(null);
+    }
+  }), [appendEntryLog, appendTextLog, upsertNet, ensureNetRequestNode, updateNetNodeLabel, setStatus, setAttachedIndex]);
+  const cdpClientHook = useCdpClient(cdpCallbacks, { network: opts.network });
+  const {
+    attach,
+    detach,
+    evaluate,
+    getProperties,
+    getResponseBody,
+    ping
+  } = cdpClientHook;
+  const attachByIndex = useCallback6(async (index) => {
+    if (isAttachingRef.current)
+      return;
+    isAttachingRef.current = true;
+    try {
+      const t = targets[index];
+      if (!t) {
+        setStatus("invalid selection");
+        return;
       }
-      return hay.includes(q);
+      const title = (t.title ?? "").trim() || "(no title)";
+      setStatus(`attaching: ${title}`);
+      const success = await attach(t, host, opts.port);
+      if (!success) {
+        setStatus(`attach failed: ${title}`);
+        return;
+      }
+      setAttachedIndex(index);
+      appendTextLog(`[attached] ${title}`);
+      setStatus(`attached: ${title}  |  ${host}:${opts.port}`);
+      setFocus("right");
+      setRightTab("logs");
+    } finally {
+      isAttachingRef.current = false;
+    }
+  }, [targets, host, opts.port, attach, setStatus, setAttachedIndex, appendTextLog]);
+  const handleDetach = useCallback6(async () => {
+    await detach();
+    setAttachedIndex(null);
+    setStatus(`detached  |  ${host}:${opts.port}`);
+  }, [detach, setAttachedIndex, setStatus, host, opts.port]);
+  const submitEval = useCallback6(async () => {
+    const expr = evalText.trim();
+    setEvalText("");
+    setEvalOpen(false);
+    if (!expr)
+      return;
+    appendTextLog(`[eval] ${expr}`);
+    const result = await evaluate(expr);
+    if (!result) {
+      appendTextLog("[eval] ! not attached (select a target and press Enter)");
+      return;
+    }
+    if (result.exceptionDetails) {
+      const text = String(result.exceptionDetails.text ?? "exception");
+      appendTextLog(`[eval] ! ${text}`);
+      if (result.exceptionDetails.exception) {
+        appendEntryLog(`eval!`, [result.exceptionDetails.exception], Date.now());
+      }
+      return;
+    }
+    if (result.result) {
+      appendEntryLog(`eval =>`, [result.result], Date.now());
+    }
+  }, [evalText, evaluate, appendTextLog, appendEntryLog]);
+  useEffect5(() => {
+    if (!opts.targetQuery)
+      return;
+    if (!targets.length)
+      return;
+    const picked = getAutoAttachTarget();
+    if (picked) {
+      setSelectedIndex(picked.index);
+      attachByIndex(picked.index);
+    } else {
+      appendTextLog(`[auto-attach] no match for: ${opts.targetQuery}`);
+    }
+  }, [targets.length > 0]);
+  useEffect5(() => {
+    return () => {
+      handleDetach();
+    };
+  }, []);
+  useEffect5(() => {
+    setTargetScrollTop((top) => {
+      const maxTop = Math.max(0, targets.length - visibleTargetItems);
+      const curTop = clamp(top, 0, maxTop);
+      if (selectedIndex < curTop)
+        return selectedIndex;
+      if (selectedIndex >= curTop + visibleTargetItems)
+        return selectedIndex - visibleTargetItems + 1;
+      return curTop;
     });
-  }, [logTree, logSearchQuery]);
-  const flatLogs = useMemo(() => flattenLogTree(filteredLogTree), [filteredLogTree]);
-  const filteredNetTree = useMemo(() => {
-    const q = netSearchQuery.trim().toLowerCase();
-    if (!q)
-      return netTree;
-    return netTree.filter((n) => {
-      const hay = `${n.label ?? ""} ${n.text ?? ""}`.toLowerCase();
-      return hay.includes(q);
-    });
-  }, [netTree, netSearchQuery]);
-  const flatNet = useMemo(() => flattenLogTree(filteredNetTree), [filteredNetTree]);
-  const selectedLogIndex = useMemo(() => {
-    if (!flatLogs.length)
-      return -1;
-    if (!selectedLogNodeId)
-      return flatLogs.length - 1;
-    const idx = flatLogs.findIndex((l) => l.nodeId === selectedLogNodeId);
-    return idx >= 0 ? idx : flatLogs.length - 1;
-  }, [flatLogs, selectedLogNodeId]);
-  const selectedNetIndex = useMemo(() => {
-    if (!flatNet.length)
-      return -1;
-    if (!selectedNetNodeId)
-      return flatNet.length - 1;
-    const idx = flatNet.findIndex((l) => l.nodeId === selectedNetNodeId);
-    return idx >= 0 ? idx : flatNet.length - 1;
-  }, [flatNet, selectedNetNodeId]);
-  useEffect(() => {
-    if (!flatLogs.length) {
-      setSelectedLogNodeId(null);
-      setLogScrollTop(0);
-      return;
-    }
-    if (!selectedLogNodeId) {
-      setSelectedLogNodeId(flatLogs[flatLogs.length - 1]?.nodeId ?? null);
-    }
-    if (followTail) {
-      setSelectedLogNodeId(flatLogs[flatLogs.length - 1]?.nodeId ?? null);
-      setLogScrollTop(Math.max(0, flatLogs.length - visibleLogLines));
-      return;
-    }
-    setLogScrollTop((top) => clamp(top, 0, Math.max(0, flatLogs.length - visibleLogLines)));
-  }, [flatLogs.length, followTail, visibleLogLines]);
-  useEffect(() => {
-    if (!flatNet.length) {
-      setSelectedNetNodeId(null);
-      setNetScrollTop(0);
-      return;
-    }
-    if (!selectedNetNodeId) {
-      setSelectedNetNodeId(flatNet[flatNet.length - 1]?.nodeId ?? null);
-    }
-    if (followNetTail) {
-      setSelectedNetNodeId(flatNet[flatNet.length - 1]?.nodeId ?? null);
-      setNetScrollTop(Math.max(0, flatNet.length - visibleLogLines));
-      return;
-    }
-    setNetScrollTop((top) => clamp(top, 0, Math.max(0, flatNet.length - visibleLogLines)));
-  }, [flatNet.length, followNetTail, visibleLogLines]);
-  useEffect(() => {
-    if (netSearchQuery.trim())
-      setFollowNetTail(false);
-  }, [netSearchQuery]);
-  useEffect(() => {
-    if (logSearchQuery.trim())
-      setFollowTail(false);
-  }, [logSearchQuery]);
-  useEffect(() => {
+  }, [selectedIndex, targets.length, visibleTargetItems]);
+  useEffect5(() => {
     if (focus !== "right" || rightTab !== "logs")
       return;
     if (!flatLogs.length)
@@ -2619,8 +4257,8 @@ function App({ opts }) {
         nextTop = selectedLogIndex - visibleLogLines + 1;
       return nextTop;
     });
-  }, [focus, selectedLogIndex, flatLogs.length, visibleLogLines]);
-  useEffect(() => {
+  }, [focus, rightTab, selectedLogIndex, flatLogs.length, visibleLogLines, setLogScrollTop]);
+  useEffect5(() => {
     if (focus !== "right" || rightTab !== "network")
       return;
     if (!flatNet.length)
@@ -2636,883 +4274,8 @@ function App({ opts }) {
         nextTop = selectedNetIndex - visibleLogLines + 1;
       return nextTop;
     });
-  }, [focus, rightTab, selectedNetIndex, flatNet.length, visibleLogLines]);
-  const appendTextLog = (line) => {
-    const newLines = splitLines(line);
-    setLogTree((prev) => {
-      const next = prev.concat(newLines.map((t) => ({
-        id: newNodeId(),
-        kind: "text",
-        text: t
-      })));
-      if (next.length > LOG_MAX_LINES)
-        return next.slice(next.length - LOG_MAX_LINES);
-      return next;
-    });
-  };
-  const appendEntryLog = (label, args = [], timestamp) => {
-    setLogTree((prev) => {
-      const next = prev.concat([
-        {
-          id: newNodeId(),
-          kind: "entry",
-          label,
-          args,
-          timestamp,
-          expanded: false
-        }
-      ]);
-      if (next.length > LOG_MAX_LINES)
-        return next.slice(next.length - LOG_MAX_LINES);
-      return next;
-    });
-  };
-  const clearLogs = () => {
-    setLogTree([]);
-    setSelectedLogNodeId(null);
-    setLogScrollTop(0);
-    setFollowTail(true);
-  };
-  const clearNetwork = () => {
-    setNetTree([]);
-    netByIdRef.current.clear();
-    setSelectedNetNodeId(null);
-    setNetScrollTop(0);
-    setFollowNetTail(true);
-    setNetSearchQuery("");
-  };
-  const netByIdRef = useRef(new Map);
-  const upsertNet = (rid, patch) => {
-    const prev = netByIdRef.current.get(rid) ?? { requestId: rid };
-    netByIdRef.current.set(rid, { ...prev, ...patch });
-  };
-  const getNetLabel = (rid) => {
-    const r = netByIdRef.current.get(rid);
-    const time = formatTime(r?.startTimestamp ?? Date.now());
-    const method = r?.method ?? "";
-    const url = r?.url ?? "";
-    const status2 = typeof r?.status === "number" ? r.status : undefined;
-    const tail = r?.errorText ? ` ✖ ${r.errorText}` : status2 != null ? ` ${status2}` : "";
-    return `[${time}] ${method} ${url}${tail}`.trimEnd();
-  };
-  const setNetNode = (rid, updater) => {
-    const id = `net:${rid}`;
-    setNetTree((prev) => updateNodeById(prev, id, updater));
-  };
-  const ensureNetRequestNode = (rid) => {
-    setNetTree((prev) => {
-      const id = `net:${rid}`;
-      if (findNodeById(prev, id)) {
-        return updateNodeById(prev, id, (n) => ({
-          ...n,
-          label: getNetLabel(rid)
-        }));
-      }
-      const next = prev.concat([
-        {
-          id,
-          kind: "entry",
-          label: getNetLabel(rid),
-          expanded: false,
-          net: { requestId: rid, role: "request" }
-        }
-      ]);
-      const NET_MAX = 1500;
-      return next.length > NET_MAX ? next.slice(next.length - NET_MAX) : next;
-    });
-  };
-  const buildHeadersChildren = (headers) => {
-    const entries = Object.entries(headers ?? {});
-    entries.sort((a, b) => a[0].localeCompare(b[0]));
-    const LIMIT = 120;
-    const sliced = entries.slice(0, LIMIT);
-    const children = sliced.map(([k, v]) => ({
-      id: newNodeId(),
-      kind: "text",
-      text: `${k}: ${v}`
-    }));
-    if (entries.length > LIMIT) {
-      children.push({
-        id: newNodeId(),
-        kind: "meta",
-        text: `… (${entries.length - LIMIT} more headers)`
-      });
-    }
-    if (children.length === 0)
-      children.push({
-        id: newNodeId(),
-        kind: "meta",
-        text: "(no headers)"
-      });
-    return children;
-  };
-  const buildNetChildren = (rid) => {
-    const r = netByIdRef.current.get(rid);
-    const meta = [];
-    if (r?.type)
-      meta.push({
-        id: newNodeId(),
-        kind: "text",
-        text: `type: ${r.type}`
-      });
-    if (r?.initiator)
-      meta.push({
-        id: newNodeId(),
-        kind: "text",
-        text: `initiator: ${r.initiator}`
-      });
-    if (typeof r?.encodedDataLength === "number")
-      meta.push({
-        id: newNodeId(),
-        kind: "text",
-        text: `bytes: ${r.encodedDataLength}`
-      });
-    const reqHeadersNode = {
-      id: `net:${rid}:reqHeaders`,
-      kind: "entry",
-      label: `Request Headers (${Object.keys(r?.requestHeaders ?? {}).length})`,
-      expanded: false,
-      children: buildHeadersChildren(r?.requestHeaders),
-      net: { requestId: rid, role: "headers", which: "request" }
-    };
-    const resLineParts = [];
-    if (typeof r?.status === "number")
-      resLineParts.push(String(r.status));
-    if (r?.statusText)
-      resLineParts.push(r.statusText);
-    if (r?.mimeType)
-      resLineParts.push(r.mimeType);
-    const resMeta = [];
-    if (r?.protocol)
-      resMeta.push({
-        id: newNodeId(),
-        kind: "text",
-        text: `protocol: ${r.protocol}`
-      });
-    if (r?.remoteIPAddress) {
-      const port2 = typeof r.remotePort === "number" ? `:${r.remotePort}` : "";
-      resMeta.push({
-        id: newNodeId(),
-        kind: "text",
-        text: `remote: ${r.remoteIPAddress}${port2}`
-      });
-    }
-    if (r?.fromDiskCache)
-      resMeta.push({
-        id: newNodeId(),
-        kind: "text",
-        text: `fromDiskCache: true`
-      });
-    if (r?.fromServiceWorker)
-      resMeta.push({
-        id: newNodeId(),
-        kind: "text",
-        text: `fromServiceWorker: true`
-      });
-    const resHeadersNode = {
-      id: `net:${rid}:resHeaders`,
-      kind: "entry",
-      label: `Response Headers (${Object.keys(r?.responseHeaders ?? {}).length})`,
-      expanded: false,
-      children: buildHeadersChildren(r?.responseHeaders),
-      net: { requestId: rid, role: "headers", which: "response" }
-    };
-    const bodyNode = {
-      id: `net:${rid}:body`,
-      kind: "entry",
-      label: "Response Body",
-      expanded: false,
-      children: [
-        { id: newNodeId(), kind: "meta", text: "(press z to load)" }
-      ],
-      net: { requestId: rid, role: "body" }
-    };
-    const responseNode = {
-      id: `net:${rid}:response`,
-      kind: "entry",
-      label: `Response${resLineParts.length ? `: ${resLineParts.join(" ")}` : ""}`,
-      expanded: false,
-      children: [resHeadersNode, ...resMeta, bodyNode],
-      net: { requestId: rid, role: "response" }
-    };
-    const reqBodyNode = {
-      id: `net:${rid}:reqBody`,
-      kind: "entry",
-      label: "Request Body",
-      expanded: false,
-      children: [
-        { id: newNodeId(), kind: "meta", text: "(press z to view)" }
-      ],
-      net: { requestId: rid, role: "body", which: "request" }
-    };
-    const reqMeta = [];
-    if (r?.postData) {
-      reqMeta.push(reqBodyNode);
-    }
-    return [...meta, reqHeadersNode, ...reqMeta, responseNode];
-  };
-  const loadResponseBody = async (rid) => {
-    const c = clientRef.current;
-    const Network = c?.Network;
-    if (!Network?.getResponseBody)
-      throw new Error("Network.getResponseBody is not available (not attached?)");
-    const res = await Network.getResponseBody({ requestId: rid });
-    return {
-      body: String(res?.body ?? ""),
-      base64Encoded: Boolean(res?.base64Encoded)
-    };
-  };
-  const ensureEntryChildren = (node) => {
-    if (node.kind !== "entry")
-      return node;
-    if (node.children && node.children.length > 0)
-      return node;
-    const args = Array.isArray(node.args) ? node.args : [];
-    const children = args.map((obj, i) => ({
-      id: `${node.id}:arg:${i}`,
-      kind: "arg",
-      object: obj,
-      expanded: false
-    }));
-    return { ...node, children };
-  };
-  const ensureObjectChildrenLoading = (nodeId) => {
-    setLogTree((prev) => updateNodeById(prev, nodeId, (n) => {
-      if (n.kind !== "arg" && n.kind !== "prop")
-        return n;
-      if (n.loading)
-        return n;
-      const obj = n.kind === "arg" ? n.object : n.value;
-      if (!isObjectExpandable(obj))
-        return n;
-      return {
-        ...n,
-        loading: true,
-        children: [
-          {
-            id: newNodeId(),
-            kind: "meta",
-            text: "(loading properties...)"
-          }
-        ]
-      };
-    }));
-  };
-  const setObjectChildren = (nodeId, children) => {
-    setLogTree((prev) => updateNodeById(prev, nodeId, (n) => ({
-      ...n,
-      loading: false,
-      children
-    })));
-  };
-  const loadPropertiesForObjectId = async (objectId) => {
-    const c = clientRef.current;
-    const Runtime = c?.Runtime;
-    if (!Runtime?.getProperties)
-      throw new Error("Runtime.getProperties is not available (not attached?)");
-    const res = await Runtime.getProperties({
-      objectId,
-      ownProperties: true,
-      accessorPropertiesOnly: false,
-      generatePreview: true
-    });
-    const list = Array.isArray(res?.result) ? res.result : [];
-    const items = list.filter((p) => p && typeof p.name === "string" && p.value).map((p) => ({
-      name: String(p.name),
-      value: p.value,
-      enumerable: Boolean(p.enumerable)
-    }));
-    items.sort((a, b) => Number(b.enumerable) - Number(a.enumerable) || a.name.localeCompare(b.name));
-    const LIMIT = 80;
-    const sliced = items.slice(0, LIMIT);
-    const children = sliced.map((it) => ({
-      id: newNodeId(),
-      kind: "prop",
-      name: it.name,
-      value: it.value,
-      expanded: false
-    }));
-    if (items.length > LIMIT) {
-      children.push({
-        id: newNodeId(),
-        kind: "meta",
-        text: `… (${items.length - LIMIT} more properties)`
-      });
-    }
-    return children;
-  };
-  const toggleExpandSelected = async () => {
-    if (isExpandingRef.current)
-      return;
-    if (!flatLogs.length)
-      return;
-    const nodeId = selectedLogNodeId ?? flatLogs[flatLogs.length - 1]?.nodeId;
-    if (!nodeId)
-      return;
-    const node = findNodeById(logTree, nodeId);
-    if (!node)
-      return;
-    const expandable = node.kind === "entry" ? Array.isArray(node.args) && node.args.length > 0 : node.kind === "arg" ? isObjectExpandable(node.object) : node.kind === "prop" ? isObjectExpandable(node.value) : false;
-    if (!expandable)
-      return;
-    const nextExpanded = !Boolean(node.expanded);
-    if (node.kind === "entry") {
-      const args = Array.isArray(node.args) ? node.args : [];
-      const firstArg = args[0];
-      const autoExpandArg0 = nextExpanded && args.length === 1 && isObjectExpandable(firstArg);
-      const arg0 = autoExpandArg0 ? firstArg : null;
-      const arg0Id = autoExpandArg0 ? `${nodeId}:arg:0` : null;
-      setLogTree((prev) => updateNodeById(prev, nodeId, (n) => {
-        const ensured = ensureEntryChildren(n);
-        if (!autoExpandArg0)
-          return { ...ensured, expanded: nextExpanded };
-        const children = Array.isArray(ensured.children) ? ensured.children : [];
-        const first = children[0];
-        const rest = children.slice(1);
-        const updatedFirst = first ? {
-          ...first,
-          expanded: true,
-          loading: true,
-          children: [
-            {
-              id: newNodeId(),
-              kind: "meta",
-              text: "(loading properties...)"
-            }
-          ]
-        } : first;
-        return {
-          ...ensured,
-          expanded: nextExpanded,
-          children: updatedFirst ? [updatedFirst, ...rest] : children
-        };
-      }));
-      if (autoExpandArg0 && arg0 && arg0Id) {
-        isExpandingRef.current = true;
-        try {
-          const children = await loadPropertiesForObjectId(arg0.objectId);
-          setObjectChildren(arg0Id, children);
-        } catch (err) {
-          setObjectChildren(arg0Id, [
-            {
-              id: newNodeId(),
-              kind: "meta",
-              text: `[props] ! ${String(err)}`
-            }
-          ]);
-        } finally {
-          isExpandingRef.current = false;
-        }
-      }
-      return;
-    }
-    setLogTree((prev) => updateNodeById(prev, nodeId, (n) => ({ ...n, expanded: nextExpanded })));
-    if (!nextExpanded)
-      return;
-    const obj = node.kind === "arg" ? node.object : node.value;
-    if (!isObjectExpandable(obj))
-      return;
-    if (Array.isArray(node.children) && node.children.length > 0 && !node.loading)
-      return;
-    isExpandingRef.current = true;
-    try {
-      ensureObjectChildrenLoading(nodeId);
-      const children = await loadPropertiesForObjectId(obj.objectId);
-      setObjectChildren(nodeId, children);
-    } catch (err) {
-      setObjectChildren(nodeId, [
-        {
-          id: newNodeId(),
-          kind: "meta",
-          text: `[props] ! ${String(err)}`
-        }
-      ]);
-    } finally {
-      isExpandingRef.current = false;
-    }
-  };
-  const collapseSelectedRegion = () => {
-    if (!flatLogs.length)
-      return;
-    const currentId = selectedLogNodeId ?? flatLogs[flatLogs.length - 1]?.nodeId;
-    if (!currentId)
-      return;
-    const current = findNodeById(logTree, currentId);
-    if (current?.expanded) {
-      setLogTree((prev) => updateNodeById(prev, currentId, (n) => ({ ...n, expanded: false })));
-      return;
-    }
-    const flatIndex = flatLogs.findIndex((l) => l.nodeId === currentId);
-    if (flatIndex < 0)
-      return;
-    let parentId = flatLogs[flatIndex]?.parentId ?? null;
-    while (parentId) {
-      const parentNode = findNodeById(logTree, parentId);
-      if (parentNode?.expanded) {
-        const pid = parentId;
-        setSelectedLogNodeId(pid);
-        setLogTree((prev) => updateNodeById(prev, pid, (n) => ({ ...n, expanded: false })));
-        return;
-      }
-      const parentFlatIndex = flatLogs.findIndex((l) => l.nodeId === parentId);
-      parentId = parentFlatIndex >= 0 ? flatLogs[parentFlatIndex].parentId : null;
-    }
-  };
-  const toggleNetExpandSelected = async () => {
-    if (isExpandingRef.current)
-      return;
-    if (!flatNet.length)
-      return;
-    const nodeId = selectedNetNodeId ?? flatNet[flatNet.length - 1]?.nodeId;
-    if (!nodeId)
-      return;
-    const node = findNodeById(netTree, nodeId);
-    if (!node)
-      return;
-    const hasChildren = Array.isArray(node.children) && node.children.length > 0;
-    const expandable = node.kind === "entry" ? hasChildren || Boolean(node.net) : false;
-    if (!expandable)
-      return;
-    const nextExpanded = !Boolean(node.expanded);
-    if (node.net?.role === "request") {
-      const rid = node.net.requestId;
-      setNetTree((prev) => updateNodeById(prev, nodeId, (n) => {
-        const already = Array.isArray(n.children) && n.children.length > 0;
-        const children = already ? n.children : buildNetChildren(rid);
-        return { ...n, expanded: nextExpanded, children };
-      }));
-      return;
-    }
-    if (node.net?.role === "body" && node.net?.which === "request") {
-      const rid = node.net.requestId;
-      setNetTree((prev) => updateNodeById(prev, nodeId, (n) => ({ ...n, expanded: nextExpanded })));
-      if (!nextExpanded)
-        return;
-      const record = netByIdRef.current.get(rid);
-      if (record?.postData) {
-        const { lines, typeHint } = formatResponseBody(record.postData, false);
-        const LIMIT = 300;
-        const sliced = lines.slice(0, LIMIT);
-        const children = [
-          { id: newNodeId(), kind: "meta", text: typeHint },
-          ...sliced.map((t) => ({
-            id: newNodeId(),
-            kind: "text",
-            text: t
-          }))
-        ];
-        if (lines.length > LIMIT) {
-          children.push({
-            id: newNodeId(),
-            kind: "meta",
-            text: `… (${lines.length - LIMIT} more lines)`
-          });
-        }
-        setNetTree((prev) => updateNodeById(prev, nodeId, (n) => ({ ...n, children })));
-        return;
-      }
-      return;
-    }
-    if (node.net?.role === "body") {
-      const rid = node.net.requestId;
-      setNetTree((prev) => updateNodeById(prev, nodeId, (n) => ({ ...n, expanded: nextExpanded })));
-      if (!nextExpanded)
-        return;
-      const record = netByIdRef.current.get(rid);
-      if (record?.responseBody) {
-        const rb = record.responseBody;
-        const { lines, typeHint } = formatResponseBody(rb.body, rb.base64Encoded);
-        const LIMIT = 300;
-        const sliced = lines.slice(0, LIMIT);
-        const children = [
-          { id: newNodeId(), kind: "meta", text: typeHint },
-          ...sliced.map((t) => ({
-            id: newNodeId(),
-            kind: "text",
-            text: t
-          }))
-        ];
-        if (lines.length > LIMIT) {
-          children.push({
-            id: newNodeId(),
-            kind: "meta",
-            text: `… (${lines.length - LIMIT} more lines)`
-          });
-        }
-        setNetTree((prev) => updateNodeById(prev, nodeId, (n) => ({ ...n, children })));
-        return;
-      }
-      isExpandingRef.current = true;
-      setNetTree((prev) => updateNodeById(prev, nodeId, (n) => ({
-        ...n,
-        loading: true,
-        children: [
-          {
-            id: newNodeId(),
-            kind: "meta",
-            text: "(loading response body...)"
-          }
-        ]
-      })));
-      try {
-        const body = await loadResponseBody(rid);
-        upsertNet(rid, { responseBody: body });
-        const { lines, typeHint } = formatResponseBody(body.body, body.base64Encoded);
-        const LIMIT = 300;
-        const sliced = lines.slice(0, LIMIT);
-        const children = [
-          { id: newNodeId(), kind: "meta", text: typeHint },
-          ...sliced.map((t) => ({
-            id: newNodeId(),
-            kind: "text",
-            text: t
-          }))
-        ];
-        if (lines.length > LIMIT) {
-          children.push({
-            id: newNodeId(),
-            kind: "meta",
-            text: `… (${lines.length - LIMIT} more lines)`
-          });
-        }
-        setNetTree((prev) => updateNodeById(prev, nodeId, (n) => ({
-          ...n,
-          loading: false,
-          children
-        })));
-      } catch (err) {
-        setNetTree((prev) => updateNodeById(prev, nodeId, (n) => ({
-          ...n,
-          loading: false,
-          children: [
-            {
-              id: newNodeId(),
-              kind: "meta",
-              text: `[body] ! ${String(err)}`
-            }
-          ]
-        })));
-      } finally {
-        isExpandingRef.current = false;
-      }
-      return;
-    }
-    setNetTree((prev) => updateNodeById(prev, nodeId, (n) => ({ ...n, expanded: nextExpanded })));
-  };
-  const collapseNetSelectedRegion = () => {
-    if (!flatNet.length)
-      return;
-    const currentId = selectedNetNodeId ?? flatNet[flatNet.length - 1]?.nodeId;
-    if (!currentId)
-      return;
-    const current = findNodeById(netTree, currentId);
-    if (current?.expanded) {
-      setNetTree((prev) => updateNodeById(prev, currentId, (n) => ({ ...n, expanded: false })));
-      return;
-    }
-    const flatIndex = flatNet.findIndex((l) => l.nodeId === currentId);
-    if (flatIndex < 0)
-      return;
-    let parentId = flatNet[flatIndex]?.parentId ?? null;
-    while (parentId) {
-      const parentNode = findNodeById(netTree, parentId);
-      if (parentNode?.expanded) {
-        const pid = parentId;
-        setSelectedNetNodeId(pid);
-        setNetTree((prev) => updateNodeById(prev, pid, (n) => ({ ...n, expanded: false })));
-        return;
-      }
-      const parentFlatIndex = flatNet.findIndex((l) => l.nodeId === parentId);
-      parentId = parentFlatIndex >= 0 ? flatNet[parentFlatIndex].parentId : null;
-    }
-  };
-  const refreshTargets = async (preferIndex) => {
-    setStatus(`fetching targets from ${host}:${port} ...`);
-    const fetch = async (h) => {
-      return await listTargets({ host: h, port });
-    };
-    try {
-      const t = await fetch(host);
-      setTargets(t);
-      const prevSelectedId = selectedTargetIdRef.current;
-      const prevAttachedId = attachedTargetIdRef.current;
-      const selectedById = prevSelectedId != null ? t.findIndex((x) => x.id === prevSelectedId) : -1;
-      const attachedById = prevAttachedId != null ? t.findIndex((x) => x.id === prevAttachedId) : -1;
-      const idxRaw = selectedById >= 0 ? selectedById : typeof preferIndex === "number" ? preferIndex : selectedIndex;
-      const idx = clamp(idxRaw, 0, Math.max(0, t.length - 1));
-      setSelectedIndex(idx);
-      setAttachedIndex(attachedById >= 0 ? attachedById : null);
-      lastFetchErrorRef.current = null;
-      setStatus(`targets: ${t.length}  |  ${host}:${port}`);
-      return;
-    } catch (err) {
-      const firstErr = String(err);
-      if (host === "localhost") {
-        try {
-          const t = await fetch("127.0.0.1");
-          setHost("127.0.0.1");
-          setTargets(t);
-          const idx = clamp(typeof preferIndex === "number" ? preferIndex : selectedIndex, 0, Math.max(0, t.length - 1));
-          setSelectedIndex(idx);
-          appendTextLog("[hint] localhost failed; switched host to 127.0.0.1");
-          setStatus(`targets: ${t.length}  |  127.0.0.1:${port}`);
-          return;
-        } catch {}
-      }
-      if (lastFetchErrorRef.current !== firstErr) {
-        appendTextLog(firstErr);
-        lastFetchErrorRef.current = firstErr;
-      }
-      setTargets([]);
-      setStatus(`failed to fetch targets from ${host}:${port}`);
-      if (!hasShownConnectHelpRef.current) {
-        hasShownConnectHelpRef.current = true;
-        appendTextLog([
-          "[hint] Start Chrome with remote debugging enabled:",
-          '  open -na "Google Chrome" --args --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-cdp',
-          "[hint] Verify endpoint:",
-          `  curl http://${host}:${port}/json/list`
-        ].join(`
-`));
-      }
-    }
-  };
-  const detach = async () => {
-    const c = clientRef.current;
-    clientRef.current = null;
-    await safeCloseClient(c);
-    setAttachedIndex(null);
-    setStatus(`detached  |  ${host}:${port}`);
-  };
-  const submitEval = async () => {
-    const expr = evalText.trim();
-    setEvalText("");
-    setEvalOpen(false);
-    if (!expr)
-      return;
-    appendTextLog(`[eval] ${expr}`);
-    const c = clientRef.current;
-    const Runtime = c?.Runtime;
-    if (!Runtime?.evaluate) {
-      appendTextLog("[eval] ! not attached (select a target and press Enter)");
-      return;
-    }
-    try {
-      const res = await Runtime.evaluate({
-        expression: expr,
-        awaitPromise: true,
-        returnByValue: false
-      });
-      if (res?.exceptionDetails) {
-        const text = String(res.exceptionDetails.text ?? "exception");
-        appendTextLog(`[eval] ! ${text}`);
-        if (res.exceptionDetails.exception) {
-          appendEntryLog(`eval!`, [res.exceptionDetails.exception], Date.now());
-        }
-        return;
-      }
-      appendEntryLog(`eval =>`, [res?.result], Date.now());
-    } catch (err) {
-      appendTextLog(`[eval] ! ${String(err)}`);
-    }
-  };
-  const attachByIndex = async (index) => {
-    if (isAttachingRef.current)
-      return;
-    isAttachingRef.current = true;
-    try {
-      const t = targets[index];
-      if (!t) {
-        setStatus("invalid selection");
-        return;
-      }
-      await detach();
-      const title = (t.title ?? "").trim() || "(no title)";
-      setStatus(`attaching: ${title}`);
-      let c;
-      try {
-        c = await connectToTarget(t, { host, port });
-      } catch (err) {
-        appendTextLog(String(err));
-        setStatus(`attach failed: ${title}`);
-        return;
-      }
-      clientRef.current = c;
-      setAttachedIndex(index);
-      attachedTargetIdRef.current = t.id;
-      const anyClient = c;
-      if (typeof anyClient.on === "function") {
-        anyClient.on("disconnect", () => {
-          appendTextLog("[transport] disconnected");
-          setStatus("disconnected (press r to refresh targets)");
-          setAttachedIndex(null);
-        });
-      }
-      const { Runtime, Log, Network, Console } = anyClient;
-      try {
-        await Promise.all([
-          Runtime?.enable?.(),
-          Console?.enable?.(),
-          Log?.enable?.(),
-          Network?.enable?.()
-        ]);
-      } catch (err) {
-        appendTextLog(`[enable] ${String(err)}`);
-      }
-      Runtime?.consoleAPICalled?.((p) => {
-        const time = formatTime(p?.timestamp ?? Date.now());
-        const type = String(p?.type ?? "log");
-        const args = Array.isArray(p?.args) ? p.args : [];
-        appendEntryLog(`[${time}] console.${type}`, args, p?.timestamp);
-      });
-      Runtime?.exceptionThrown?.((p) => {
-        const time = formatTime(p?.timestamp ?? Date.now());
-        const details = p?.exceptionDetails;
-        const text = details?.text ? String(details.text) : "exception";
-        const args = details?.exception ? [details.exception] : [];
-        appendEntryLog(`[${time}] exception ${text}`.trimEnd(), args, p?.timestamp);
-      });
-      Console?.messageAdded?.((p) => {
-        const msg = p?.message ?? p;
-        const source = typeof msg?.source === "string" ? String(msg.source) : "";
-        if (source === "console-api")
-          return;
-        const time = formatTime(msg?.timestamp ?? Date.now());
-        const level = String(msg?.level ?? "log");
-        const text = String(msg?.text ?? "");
-        const params = Array.isArray(msg?.parameters) ? msg.parameters : [];
-        appendEntryLog(`[${time}] console.${level} ${text}`.trimEnd(), params, msg?.timestamp);
-      });
-      Log?.entryAdded?.((p) => {
-        const entry = p?.entry ?? p;
-        const time = formatTime(entry?.timestamp ?? Date.now());
-        const level = String(entry?.level ?? "info");
-        const text = String(entry?.text ?? "");
-        const url = entry?.url ? ` (${entry.url})` : "";
-        appendTextLog(`[${time}] log.${level} ${text}${url}`.trimEnd());
-      });
-      Network?.requestWillBeSent?.((p) => {
-        const rid = String(p?.requestId ?? "");
-        if (!rid)
-          return;
-        const req = p?.request;
-        const url = String(req?.url ?? "");
-        const method = String(req?.method ?? "");
-        const headers = req?.headers ?? {};
-        const postData = typeof req?.postData === "string" ? req.postData : undefined;
-        const initiatorUrl = p?.initiator?.url ? String(p.initiator.url) : undefined;
-        upsertNet(rid, {
-          startTimestamp: p?.timestamp,
-          method,
-          url,
-          requestHeaders: headers,
-          postData,
-          initiator: initiatorUrl,
-          type: p?.type ? String(p.type) : undefined
-        });
-        ensureNetRequestNode(rid);
-      });
-      Network?.responseReceived?.((p) => {
-        const rid = String(p?.requestId ?? "");
-        if (!rid)
-          return;
-        const res = p?.response;
-        const headers = res?.headers ?? {};
-        upsertNet(rid, {
-          status: typeof res?.status === "number" ? res.status : undefined,
-          statusText: typeof res?.statusText === "string" ? res.statusText : undefined,
-          mimeType: typeof res?.mimeType === "string" ? res.mimeType : undefined,
-          protocol: typeof res?.protocol === "string" ? res.protocol : undefined,
-          remoteIPAddress: typeof res?.remoteIPAddress === "string" ? res.remoteIPAddress : undefined,
-          remotePort: typeof res?.remotePort === "number" ? res.remotePort : undefined,
-          fromDiskCache: Boolean(res?.fromDiskCache),
-          fromServiceWorker: Boolean(res?.fromServiceWorker),
-          responseHeaders: headers
-        });
-        ensureNetRequestNode(rid);
-        setNetNode(rid, (n) => {
-          const children = Array.isArray(n.children) && n.children.length > 0 ? buildNetChildren(rid) : n.children;
-          return { ...n, label: getNetLabel(rid), children };
-        });
-      });
-      Network?.loadingFinished?.((p) => {
-        const rid = String(p?.requestId ?? "");
-        if (!rid)
-          return;
-        upsertNet(rid, {
-          endTimestamp: p?.timestamp,
-          encodedDataLength: typeof p?.encodedDataLength === "number" ? p.encodedDataLength : undefined
-        });
-        ensureNetRequestNode(rid);
-        setNetNode(rid, (n) => ({ ...n, label: getNetLabel(rid) }));
-      });
-      Network?.loadingFailed?.((p) => {
-        const rid = String(p?.requestId ?? "");
-        if (!rid)
-          return;
-        upsertNet(rid, {
-          endTimestamp: p?.timestamp,
-          errorText: typeof p?.errorText === "string" ? p.errorText : "failed",
-          canceled: Boolean(p?.canceled)
-        });
-        ensureNetRequestNode(rid);
-        setNetNode(rid, (n) => ({ ...n, label: getNetLabel(rid) }));
-      });
-      if (opts.network) {
-        Network?.webSocketFrameSent?.((p) => {
-          const time = formatTime(p?.timestamp ?? Date.now());
-          const payload = String(p?.response?.payloadData ?? "");
-          appendTextLog(`[${time}] ws.sent ${truncate(payload, 200)}`.trimEnd());
-        });
-        Network?.webSocketFrameReceived?.((p) => {
-          const time = formatTime(p?.timestamp ?? Date.now());
-          const payload = String(p?.response?.payloadData ?? "");
-          appendTextLog(`[${time}] ws.recv ${truncate(payload, 200)}`.trimEnd());
-        });
-      }
-      appendTextLog(`[attached] ${title}`);
-      setStatus(`attached: ${title}  |  ${host}:${port}`);
-      setFocus("right");
-      setRightTab("logs");
-      try {
-        await Runtime?.evaluate?.({
-          expression: `console.log("[termdev] attached", new Date().toISOString())`
-        });
-      } catch {}
-    } finally {
-      isAttachingRef.current = false;
-    }
-  };
-  useEffect(() => {
-    refreshTargets();
-  }, []);
-  useEffect(() => {
-    if (!opts.pollMs || opts.pollMs <= 0)
-      return;
-    const id = setInterval(() => {
-      refreshTargets();
-    }, opts.pollMs);
-    return () => clearInterval(id);
-  }, [opts.pollMs, host, port]);
-  useEffect(() => {
-    if (!opts.targetQuery)
-      return;
-    if (!targets.length)
-      return;
-    const picked = pickTargetByQuery(targets, opts.targetQuery);
-    if (picked.target && picked.index >= 0) {
-      setSelectedIndex(picked.index);
-      attachByIndex(picked.index);
-    } else {
-      appendTextLog(`[auto-attach] no match for: ${opts.targetQuery}`);
-    }
-  }, [targets.length]);
-  useEffect(() => {
-    return () => {
-      detach();
-    };
-  }, []);
-  useInput((input, key) => {
+  }, [focus, rightTab, selectedNetIndex, flatNet.length, visibleLogLines, setNetScrollTop]);
+  useInput2((input, key) => {
     if (evalOpen) {
       if (key.escape) {
         setEvalOpen(false);
@@ -3610,15 +4373,11 @@ function App({ opts }) {
         setRightTab("network");
         return;
       }
-      if (input === "[") {
+      if (input === "[" || input === "]") {
         setRightTab((t) => t === "logs" ? "network" : "logs");
         return;
       }
-      if (input === "]") {
-        setRightTab((t) => t === "logs" ? "network" : "logs");
-        return;
-      }
-      const activeFlat2 = rightTab === "logs" ? flatLogs : flatNet;
+      const activeFlat = rightTab === "logs" ? flatLogs : flatNet;
       const activeIndex = rightTab === "logs" ? selectedLogIndex : selectedNetIndex;
       const setActiveSelected = (id) => {
         if (rightTab === "logs")
@@ -3633,48 +4392,49 @@ function App({ opts }) {
           setFollowNetTail(v);
       };
       if (key.upArrow || input === "k") {
-        if (!activeFlat2.length)
+        if (!activeFlat.length)
           return;
         setActiveFollow(false);
-        const nextIdx = clamp(activeIndex - 1, 0, activeFlat2.length - 1);
-        setActiveSelected(activeFlat2[nextIdx]?.nodeId ?? null);
+        const nextIdx = clamp(activeIndex - 1, 0, activeFlat.length - 1);
+        setActiveSelected(activeFlat[nextIdx]?.nodeId ?? null);
         return;
       }
       if (key.downArrow || input === "j") {
-        if (!activeFlat2.length)
+        if (!activeFlat.length)
           return;
-        const nextIdx = clamp(activeIndex + 1, 0, activeFlat2.length - 1);
-        setActiveSelected(activeFlat2[nextIdx]?.nodeId ?? null);
-        if (nextIdx === activeFlat2.length - 1)
+        const nextIdx = clamp(activeIndex + 1, 0, activeFlat.length - 1);
+        setActiveSelected(activeFlat[nextIdx]?.nodeId ?? null);
+        if (nextIdx === activeFlat.length - 1)
           setActiveFollow(true);
         else
           setActiveFollow(false);
         return;
       }
       if (key.pageUp || key.ctrl && input === "u") {
-        if (!activeFlat2.length)
+        if (!activeFlat.length)
           return;
         setActiveFollow(false);
-        const nextIdx = clamp(activeIndex - visibleLogLines, 0, activeFlat2.length - 1);
-        setActiveSelected(activeFlat2[nextIdx]?.nodeId ?? null);
+        const nextIdx = clamp(activeIndex - visibleLogLines, 0, activeFlat.length - 1);
+        setActiveSelected(activeFlat[nextIdx]?.nodeId ?? null);
         return;
       }
       if (key.pageDown || key.ctrl && input === "d") {
-        if (!activeFlat2.length)
+        if (!activeFlat.length)
           return;
-        const nextIdx = clamp(activeIndex + visibleLogLines, 0, activeFlat2.length - 1);
-        setActiveSelected(activeFlat2[nextIdx]?.nodeId ?? null);
-        if (nextIdx === activeFlat2.length - 1)
+        const nextIdx = clamp(activeIndex + visibleLogLines, 0, activeFlat.length - 1);
+        setActiveSelected(activeFlat[nextIdx]?.nodeId ?? null);
+        if (nextIdx === activeFlat.length - 1)
           setActiveFollow(true);
         else
           setActiveFollow(false);
         return;
       }
       if (input === "z") {
-        if (rightTab === "logs")
-          toggleExpandSelected();
-        else
-          toggleNetExpandSelected();
+        if (rightTab === "logs") {
+          toggleExpandSelected(getProperties);
+        } else {
+          toggleNetExpandSelected(getResponseBody);
+        }
         return;
       }
       if (input === "Z") {
@@ -3685,9 +4445,9 @@ function App({ opts }) {
         return;
       }
       if (input === "y") {
-        if (!activeFlat2.length)
+        if (!activeFlat.length)
           return;
-        const nodeId = (rightTab === "logs" ? selectedLogNodeId : selectedNetNodeId) ?? activeFlat2[activeFlat2.length - 1]?.nodeId;
+        const nodeId = (rightTab === "logs" ? selectedLogNodeId : selectedNetNodeId) ?? activeFlat[activeFlat.length - 1]?.nodeId;
         if (!nodeId)
           return;
         const root = rightTab === "logs" ? findNodeById(logTree, nodeId) : findNodeById(netTree, nodeId);
@@ -3714,14 +4474,11 @@ function App({ opts }) {
       }
     }
     if (input === "d") {
-      detach();
+      handleDetach();
       return;
     }
     if (input === "p") {
-      const c = clientRef.current;
-      c?.Runtime?.evaluate?.({
-        expression: `console.log("[termdev] ping", new Date().toISOString())`
-      });
+      ping();
       return;
     }
     if (input === "c") {
@@ -3749,21 +4506,7 @@ function App({ opts }) {
       appendTextLog("Keys: tab focus | q/esc quit | r refresh | targets: ↑↓/j k + enter attach | right: l logs / n network / [ ] switch | j/k select | z toggle | Z collapse | y copy | / filter | : eval | d detach | p ping | c clear(logs/network) | f follow");
     }
   });
-  useEffect(() => {
-    setTargetScrollTop((top) => {
-      const maxTop = Math.max(0, targets.length - visibleTargetItems);
-      const curTop = clamp(top, 0, maxTop);
-      if (selectedIndex < curTop)
-        return selectedIndex;
-      if (selectedIndex >= curTop + visibleTargetItems)
-        return selectedIndex - visibleTargetItems + 1;
-      return curTop;
-    });
-  }, [selectedIndex, targets.length, visibleTargetItems]);
-  useEffect(() => {
-    setSelectedIndex((i) => clamp(i, 0, Math.max(0, targets.length - 1)));
-  }, [targets.length]);
-  const attachedTitle = useMemo(() => {
+  const attachedTitle = useMemo5(() => {
     if (attachedIndex == null)
       return null;
     const t = targets[attachedIndex];
@@ -3771,463 +4514,72 @@ function App({ opts }) {
       return "(attached)";
     return (t.title ?? "").trim() || t.url || "(attached)";
   }, [targets, attachedIndex]);
-  const targetsViewport = useMemo(() => {
-    if (!targets.length)
-      return [];
-    const slice = targets.slice(targetScrollTop, targetScrollTop + visibleTargetItems);
-    return slice.map((t, offset) => {
-      const idx = targetScrollTop + offset;
-      const selected = idx === selectedIndex;
-      const attached = idx === attachedIndex;
-      const title = (t.title ?? "").trim() || "(no title)";
-      const url = (t.url ?? "").trim();
-      const type = (t.type ?? "").trim();
-      const icon = getTargetIcon(type);
-      const color = getTargetColor(type, selected, attached);
-      const statusIcon = attached ? "●" : selected ? "◦" : " ";
-      const line1Prefix = `${icon} ${statusIcon} ${String(idx).padStart(2, " ")}`;
-      const line1 = `${line1Prefix} ${title}`;
-      const meta = [type ? `${type}` : "", url].filter(Boolean).join(" · ");
-      const line2 = `      ${meta}`;
-      const maxWidth = Math.max(10, Math.floor(columns * 0.33) - 6);
-      return {
-        key: t.id,
-        lines: [truncate(line1, maxWidth), truncate(line2, maxWidth)],
-        selected,
-        attached,
-        type,
-        icon,
-        color
-      };
-    });
-  }, [
-    targets,
-    targetScrollTop,
-    visibleTargetItems,
-    selectedIndex,
-    attachedIndex,
-    columns
-  ]);
-  const activeFlat = rightTab === "logs" ? flatLogs : flatNet;
-  const activeScrollTop = rightTab === "logs" ? logScrollTop : netScrollTop;
-  const activeSelectedId = rightTab === "logs" ? selectedLogNodeId : selectedNetNodeId;
-  const activeFollow = rightTab === "logs" ? followTail : followNetTail;
-  const viewport = useMemo(() => {
-    if (!activeFlat.length)
-      return { start: 0, endExclusive: 0, lines: [] };
-    const start = clamp(activeScrollTop, 0, Math.max(0, activeFlat.length - visibleLogLines));
-    const endExclusive = clamp(start + visibleLogLines, 0, activeFlat.length);
-    return {
-      start,
-      endExclusive,
-      lines: activeFlat.slice(start, endExclusive)
-    };
-  }, [activeFlat, activeScrollTop, visibleLogLines]);
   if (showLogo) {
-    return /* @__PURE__ */ jsxDEV(LogoScreen, {
+    return /* @__PURE__ */ jsxDEV6(LogoScreen, {
       onDismiss: () => setShowLogo(false)
     }, undefined, false, undefined, this);
   }
-  const headerTitle = headerGradient(`${ICONS.logo} TermDev`);
   const connectionStatus = attachedIndex !== null;
-  return /* @__PURE__ */ jsxDEV(Box, {
+  return /* @__PURE__ */ jsxDEV6(Box6, {
     flexDirection: "column",
     width: "100%",
     children: [
-      /* @__PURE__ */ jsxDEV(Box, {
-        height: HEADER_HEIGHT,
-        children: [
-          /* @__PURE__ */ jsxDEV(Text, {
-            children: headerTitle
-          }, undefined, false, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            dimColor: true,
-            children: " │ "
-          }, undefined, false, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            color: connectionStatus ? "green" : "yellow",
-            children: connectionStatus ? ICONS.connected : ICONS.disconnected
-          }, undefined, false, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            color: connectionStatus ? "green" : "yellow",
-            children: connectionStatus ? " connected" : " waiting"
-          }, undefined, false, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            dimColor: true,
-            children: " │ "
-          }, undefined, false, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            dimColor: true,
-            children: [
-              host,
-              ":",
-              port
-            ]
-          }, undefined, true, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            dimColor: true,
-            children: " │ "
-          }, undefined, false, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            color: "cyan",
-            children: [
-              ICONS.list,
-              " "
-            ]
-          }, undefined, true, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            color: "cyanBright",
-            bold: true,
-            children: targets.length
-          }, undefined, false, undefined, this),
-          attachedTitle ? /* @__PURE__ */ jsxDEV(Fragment, {
-            children: [
-              /* @__PURE__ */ jsxDEV(Text, {
-                dimColor: true,
-                children: " │ "
-              }, undefined, false, undefined, this),
-              /* @__PURE__ */ jsxDEV(Text, {
-                color: "green",
-                children: [
-                  ICONS.plug,
-                  " "
-                ]
-              }, undefined, true, undefined, this),
-              /* @__PURE__ */ jsxDEV(Text, {
-                color: "green",
-                children: truncate(attachedTitle, Math.max(10, columns - 65))
-              }, undefined, false, undefined, this)
-            ]
-          }, undefined, true, undefined, this) : null
-        ]
-      }, undefined, true, undefined, this),
-      /* @__PURE__ */ jsxDEV(Box, {
+      /* @__PURE__ */ jsxDEV6(Header, {
+        host,
+        port: opts.port,
+        connected: connectionStatus,
+        targetsCount: targets.length,
+        attachedTitle,
+        columns
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsxDEV6(Box6, {
         flexGrow: 1,
         height: mainHeight,
         children: [
-          /* @__PURE__ */ jsxDEV(Box, {
-            flexDirection: "column",
-            width: "33%",
-            borderStyle: "round",
-            borderColor: focus === "targets" ? "green" : "gray",
-            paddingX: 1,
-            paddingY: 0,
-            marginRight: 1,
-            children: [
-              /* @__PURE__ */ jsxDEV(Text, {
-                bold: true,
-                color: focus === "targets" ? "cyan" : undefined,
-                children: [
-                  ICONS.list,
-                  " Targets",
-                  focus === "targets" ? ` ${ICONS.star}` : "",
-                  " ",
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    dimColor: true,
-                    children: "(↑↓ Enter)"
-                  }, undefined, false, undefined, this)
-                ]
-              }, undefined, true, undefined, this),
-              targets.length === 0 ? /* @__PURE__ */ jsxDEV(Text, {
-                dimColor: true,
-                children: [
-                  "(no targets)",
-                  lastFetchErrorRef.current ? "" : `
-Press r to refresh`
-                ]
-              }, undefined, true, undefined, this) : /* @__PURE__ */ jsxDEV(Box, {
-                flexDirection: "column",
-                children: [
-                  targetsViewport.map((item) => /* @__PURE__ */ jsxDEV(Box, {
-                    flexDirection: "column",
-                    children: [
-                      /* @__PURE__ */ jsxDEV(Text, {
-                        color: item.color,
-                        bold: item.selected,
-                        inverse: item.selected,
-                        children: item.lines[0]
-                      }, undefined, false, undefined, this),
-                      /* @__PURE__ */ jsxDEV(Text, {
-                        dimColor: true,
-                        color: item.attached ? "green" : undefined,
-                        children: item.lines[1]
-                      }, undefined, false, undefined, this)
-                    ]
-                  }, item.key, true, undefined, this)),
-                  targets.length > visibleTargetItems ? /* @__PURE__ */ jsxDEV(Text, {
-                    dimColor: true,
-                    children: [
-                      ICONS.bullet,
-                      " ",
-                      targetScrollTop + 1,
-                      "-",
-                      Math.min(targetScrollTop + visibleTargetItems, targets.length),
-                      "/",
-                      targets.length
-                    ]
-                  }, undefined, true, undefined, this) : null
-                ]
-              }, undefined, true, undefined, this)
-            ]
-          }, undefined, true, undefined, this),
-          /* @__PURE__ */ jsxDEV(Box, {
-            flexDirection: "column",
-            width: "67%",
-            borderStyle: "round",
-            borderColor: focus === "right" ? "green" : "gray",
-            paddingX: 1,
-            children: [
-              /* @__PURE__ */ jsxDEV(Text, {
-                bold: true,
-                children: [
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    color: rightTab === "logs" ? "yellowBright" : "gray",
-                    bold: rightTab === "logs",
-                    children: [
-                      ICONS.list,
-                      " Logs"
-                    ]
-                  }, undefined, true, undefined, this),
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    dimColor: true,
-                    children: " │ "
-                  }, undefined, false, undefined, this),
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    color: rightTab === "network" ? "magentaBright" : "gray",
-                    bold: rightTab === "network",
-                    children: [
-                      ICONS.network,
-                      " Network"
-                    ]
-                  }, undefined, true, undefined, this),
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    dimColor: true,
-                    children: "  "
-                  }, undefined, false, undefined, this),
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    color: "gray",
-                    children: [
-                      "(",
-                      viewport.start + 1,
-                      "-",
-                      viewport.endExclusive,
-                      "/",
-                      activeFlat.length,
-                      ")"
-                    ]
-                  }, undefined, true, undefined, this),
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    color: activeFollow ? "green" : "yellow",
-                    children: activeFollow ? ` ${ICONS.connected} follow` : ` ${ICONS.disconnected} paused`
-                  }, undefined, false, undefined, this),
-                  focus === "right" ? /* @__PURE__ */ jsxDEV(Text, {
-                    color: "greenBright",
-                    children: [
-                      " ",
-                      ICONS.star
-                    ]
-                  }, undefined, true, undefined, this) : null
-                ]
-              }, undefined, true, undefined, this),
-              /* @__PURE__ */ jsxDEV(Box, {
-                flexDirection: "column",
-                children: viewport.lines.map((line, i) => {
-                  const idx = viewport.start + i;
-                  const isSelected = focus === "right" && activeFlat[idx]?.nodeId === activeSelectedId;
-                  const icon = line.expandable ? line.expanded ? ICONS.expand : ICONS.collapse : " ";
-                  const prefix = `${" ".repeat(line.indent * 2)}${icon} `;
-                  const rendered = `${prefix}${line.text}`;
-                  const style = classifyLogLine(line.text);
-                  return /* @__PURE__ */ jsxDEV(Text, {
-                    inverse: isSelected,
-                    color: style.color,
-                    dimColor: style.dim || !isSelected && focus !== "right",
-                    children: truncate(rendered, Math.max(10, Math.floor(columns * 0.67) - 6))
-                  }, line.nodeId, false, undefined, this);
-                })
-              }, undefined, false, undefined, this),
-              evalOpen ? /* @__PURE__ */ jsxDEV(Box, {
-                marginTop: 0,
-                children: [
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    color: "greenBright",
-                    bold: true,
-                    children: [
-                      ICONS.zap,
-                      " js›",
-                      " "
-                    ]
-                  }, undefined, true, undefined, this),
-                  /* @__PURE__ */ jsxDEV(TextInput, {
-                    value: evalText,
-                    onChange: setEvalText
-                  }, undefined, false, undefined, this),
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    dimColor: true,
-                    children: " (Enter run, Esc cancel)"
-                  }, undefined, false, undefined, this)
-                ]
-              }, undefined, true, undefined, this) : netSearchOpen ? /* @__PURE__ */ jsxDEV(Box, {
-                marginTop: 0,
-                children: [
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    color: "cyanBright",
-                    bold: true,
-                    children: [
-                      ICONS.search,
-                      " /",
-                      " "
-                    ]
-                  }, undefined, true, undefined, this),
-                  /* @__PURE__ */ jsxDEV(TextInput, {
-                    value: netSearchQuery,
-                    onChange: setNetSearchQuery
-                  }, undefined, false, undefined, this),
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    dimColor: true,
-                    children: " (Enter done, Esc close, Ctrl+U clear)"
-                  }, undefined, false, undefined, this)
-                ]
-              }, undefined, true, undefined, this) : logSearchOpen ? /* @__PURE__ */ jsxDEV(Box, {
-                marginTop: 0,
-                children: [
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    color: "cyanBright",
-                    bold: true,
-                    children: [
-                      ICONS.search,
-                      " /",
-                      " "
-                    ]
-                  }, undefined, true, undefined, this),
-                  /* @__PURE__ */ jsxDEV(TextInput, {
-                    value: logSearchQuery,
-                    onChange: setLogSearchQuery
-                  }, undefined, false, undefined, this),
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    dimColor: true,
-                    children: " (Enter done, Esc close, Ctrl+U clear)"
-                  }, undefined, false, undefined, this)
-                ]
-              }, undefined, true, undefined, this) : /* @__PURE__ */ jsxDEV(Text, {
-                dimColor: true,
-                children: [
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    color: "yellow",
-                    children: "l"
-                  }, undefined, false, undefined, this),
-                  " logs ",
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    color: "yellow",
-                    children: "n"
-                  }, undefined, false, undefined, this),
-                  " network ",
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    color: "yellow",
-                    children: "j/k"
-                  }, undefined, false, undefined, this),
-                  " select ",
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    color: "yellow",
-                    children: "z"
-                  }, undefined, false, undefined, this),
-                  " expand ",
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    color: "yellow",
-                    children: "/"
-                  }, undefined, false, undefined, this),
-                  " filter ",
-                  /* @__PURE__ */ jsxDEV(Text, {
-                    color: "yellow",
-                    children: ":"
-                  }, undefined, false, undefined, this),
-                  " eval"
-                ]
-              }, undefined, true, undefined, this)
-            ]
-          }, undefined, true, undefined, this)
-        ]
-      }, undefined, true, undefined, this),
-      /* @__PURE__ */ jsxDEV(Box, {
-        children: [
-          /* @__PURE__ */ jsxDEV(Text, {
-            backgroundColor: "gray",
-            color: "black",
-            children: [
-              " ",
-              /* @__PURE__ */ jsxDEV(Text, {
-                color: connectionStatus ? "green" : "yellow",
-                children: connectionStatus ? ICONS.connected : ICONS.disconnected
-              }, undefined, false, undefined, this),
-              " "
-            ]
-          }, undefined, true, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            backgroundColor: "gray",
-            color: "black",
-            children: truncate(status, Math.max(10, columns - 60))
+          /* @__PURE__ */ jsxDEV6(TargetList, {
+            targets,
+            selectedIndex,
+            attachedIndex,
+            focused: focus === "targets",
+            panelInnerHeight,
+            columns,
+            targetScrollTop
           }, undefined, false, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            backgroundColor: "gray",
-            color: "black",
-            children: " │ "
-          }, undefined, false, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            backgroundColor: "gray",
-            color: "blue",
-            bold: true,
-            children: "tab"
-          }, undefined, false, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            backgroundColor: "gray",
-            color: "black",
-            children: " focus "
-          }, undefined, false, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            backgroundColor: "gray",
-            color: "blue",
-            bold: true,
-            children: "r"
-          }, undefined, false, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            backgroundColor: "gray",
-            color: "black",
-            children: " refresh "
-          }, undefined, false, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            backgroundColor: "gray",
-            color: "blue",
-            bold: true,
-            children: "c"
-          }, undefined, false, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            backgroundColor: "gray",
-            color: "black",
-            children: " clear "
-          }, undefined, false, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            backgroundColor: "gray",
-            color: "blue",
-            bold: true,
-            children: "q"
-          }, undefined, false, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            backgroundColor: "gray",
-            color: "black",
-            children: " quit "
-          }, undefined, false, undefined, this),
-          /* @__PURE__ */ jsxDEV(Text, {
-            backgroundColor: "gray",
-            color: "black",
-            children: " ".repeat(Math.max(0, columns - 80))
+          /* @__PURE__ */ jsxDEV6(RightPanel, {
+            focused: focus === "right",
+            rightTab,
+            flatLogs,
+            flatNet,
+            selectedLogNodeId,
+            selectedNetNodeId,
+            logScrollTop,
+            netScrollTop,
+            followTail,
+            followNetTail,
+            visibleLogLines,
+            evalOpen,
+            evalText,
+            setEvalText,
+            logSearchOpen,
+            logSearchQuery,
+            setLogSearchQuery,
+            netSearchOpen,
+            netSearchQuery,
+            setNetSearchQuery,
+            columns
           }, undefined, false, undefined, this)
         ]
-      }, undefined, true, undefined, this)
+      }, undefined, true, undefined, this),
+      /* @__PURE__ */ jsxDEV6(Footer, {
+        connected: connectionStatus,
+        status,
+        columns
+      }, undefined, false, undefined, this)
     ]
   }, undefined, true, undefined, this);
 }
 async function runTui(opts) {
-  const instance = render(/* @__PURE__ */ jsxDEV(App, {
+  const instance = render(/* @__PURE__ */ jsxDEV6(App, {
     opts: {
       host: opts.host,
       port: opts.port,
@@ -4260,4 +4612,4 @@ async function run(argv) {
 var argv = typeof Bun !== "undefined" ? Bun.argv : process.argv;
 await run(argv.slice(2));
 
-//# debugId=0D226FD086BBDFDC64756E2164756E21
+//# debugId=5EF9F3510C80EB9B64756E2164756E21
